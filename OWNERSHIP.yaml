@@ -1,0 +1,7 @@
+bounded_context: "open_finance"
+service_id: "svc-of-open-products-catalog"
+application_id: "app.of.open-products-catalog"
+data_owner_pattern: "db_of_open_products_catalog_prod"
+event_namespace: "evt.of.products"
+owning_squad: "Open Data Squad"
+wave: "1"
