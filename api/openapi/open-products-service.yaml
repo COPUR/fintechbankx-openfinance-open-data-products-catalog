@@ -12,6 +12,7 @@ paths:
       operationId: listProducts
       tags:
         - Products
+      security: []
       parameters:
         - $ref: '#/components/parameters/InteractionId'
         - $ref: '#/components/parameters/AuthorizationOptional'
