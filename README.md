@@ -1,2 +1,7 @@
-# openfinance-open-products-catalog-service
-DDD/EDA open_finance capability (svc-of-open-products-catalog) owner:Open Data Squad wave:1
+# Open Products Catalog Service
+
+Repository stub for the public products catalog microservice.
+
+- Runtime: Java 23 + Gradle
+- Architecture: Hexagonal (Ports & Adapters)
+
