@@ -9,6 +9,7 @@ paths:
   /products:
     get:
       summary: List products
+      security: []
       operationId: listProducts
       tags:
         - Products
