@@ -1,9 +1,10 @@
 # Open Products Catalog Service
 
-Repository stub for the public products catalog microservice.
+Public Open Finance catalog service for product discovery.
 
 - Runtime: Java 23 + Gradle
 - Architecture: Hexagonal (Ports & Adapters)
+- Domain: Open Data / Product Catalog
 
 
 
