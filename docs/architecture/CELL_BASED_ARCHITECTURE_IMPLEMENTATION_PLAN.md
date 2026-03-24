@@ -2,8 +2,8 @@
 
 ## Repository
 
-- Name: \
-- Generated: \
+- Name: fintechbankx-openfinance-open-data-products-catalog
+- Generated: 2026-03-24
 
 ## Objective
 
