@@ -32,12 +32,24 @@ paths:
             ETag:
               schema:
                 type: string
+            Cache-Control:
+              description: Public catalogue data; shared caches may keep it for up to 60 seconds and revalidate with If-None-Match.
+              schema:
+                type: string
+                example: max-age=60, public
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProductListResponse'
         '304':
           description: Not modified
+          headers:
+            ETag:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
         '400':
           description: Invalid request
           content:

@@ -10,6 +10,8 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -20,6 +22,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public class OpenProductsController {
+
+    /** Public catalogue data: shared caches may keep it briefly; ETag revalidation keeps it cheap. */
+    static final CacheControl CACHE_CONTROL = CacheControl.maxAge(60, TimeUnit.SECONDS).cachePublic();
 
     private final OpenProductsUseCase openProductsUseCase;
 
@@ -43,6 +48,7 @@ public class OpenProductsController {
                 .header("X-FAPI-Interaction-ID", interactionId)
                 .header("X-OF-Cache", "HIT")
                 .header(HttpHeaders.ETAG, eTag)
+                .cacheControl(CACHE_CONTROL)
                 .build();
         }
 
@@ -56,6 +62,7 @@ public class OpenProductsController {
             .header("X-FAPI-Interaction-ID", interactionId)
             .header("X-OF-Cache", "MISS")
             .header(HttpHeaders.ETAG, eTag)
+            .cacheControl(CACHE_CONTROL)
             .body(response);
     }
 

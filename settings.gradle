@@ -1,1 +1,9 @@
-rootProject.name = 'openfinance-microservice'
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        // The Spring Boot plugin's own dependencies are only on Maven Central.
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'open-products-catalog-service'
