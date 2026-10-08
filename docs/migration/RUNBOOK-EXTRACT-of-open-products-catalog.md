@@ -132,16 +132,19 @@ production import window (step 2's `\password`, then `put-secret-value`).
    (`aws secretsmanager get-random-password` piped into `put-secret-value`, never
    into a file or ticket). Aurora logs DDL (`log_statement=ddl`) and pgaudit
    logs role statements (`pgaudit.log=ddl,role`), so never write
-   `PASSWORD '...'`, and turn both off for this session before setting
-   passwords: create the roles without one and set it with psql's
-   `\password`, which sends only a SCRAM verifier (paste the value from the
-   secret at the prompt). With logging off for the session, not even the
-   verifier reaches the log. The same session rule applies to every later
-   rotation.
+   `PASSWORD '...'`: create the roles without one and set it with psql's
+   `\password`, which sends only a salted SCRAM verifier (paste the value from
+   the secret at the prompt). Do not try to switch logging off for the
+   session: `log_statement` is a superuser setting that the RDS admin
+   (`rds_superuser`) cannot change per session, and audit stays in the
+   parameter group (platform, 2026-10-08). The verifier therefore reaches the
+   PostgreSQL log group. That is accepted: the passwords are 32 random
+   characters from `get-random-password`, so a salted SCRAM verifier cannot be
+   reversed in practice, and read access to the log group is limited to this
+   service's operator role (terraform-modules eb31670) and the security team's
+   permission set. The same rule applies to every later rotation.
 
    ```sql
-   SET log_statement = 'none';  -- this session only; needs the admin (rds_superuser)
-   SET pgaudit.log = 'none';    -- after CREATE EXTENSION pgaudit; this session only
    CREATE ROLE open_products_catalog_owner  LOGIN;
    CREATE ROLE open_products_catalog_app    LOGIN;
    CREATE ROLE open_products_catalog_import LOGIN;
@@ -152,8 +155,6 @@ production import window (step 2's `\password`, then `put-secret-value`).
    GRANT CONNECT, CREATE    ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_owner;
    GRANT CONNECT            ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_app;
    GRANT CONNECT, TEMPORARY ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_import;
-   RESET log_statement;
-   RESET pgaudit.log;
    ```
 
    Run `CREATE EXTENSION IF NOT EXISTS pgaudit;` before the block above (the
