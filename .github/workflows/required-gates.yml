@@ -32,7 +32,9 @@ jobs:
         shell: bash
         run: |
           if [ -f build.gradle ] || [ -f settings.gradle ] || [ -f gradlew ]; then
-            if ! gradle --no-daemon clean assemble -x test; then
+            GRADLE=gradle
+            if [ -x ./gradlew ]; then GRADLE=./gradlew; fi
+            if ! $GRADLE --no-daemon clean assemble -x test; then
               if [ -f .ci/allow-gradle-fail ]; then
                 echo "Gradle build failed but .ci/allow-gradle-fail is present; continuing."
               else
@@ -52,6 +54,25 @@ jobs:
   test:
     name: ci/test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: db_of_open_products_catalog_test
+          POSTGRES_USER: open_products_test
+          POSTGRES_PASSWORD: open_products_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U open_products_test -d db_of_open_products_catalog_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # OpenProductsPostgresIT runs Flyway, the dev seed and the full service against this database.
+      TEST_DB_URL: jdbc:postgresql://localhost:5432/db_of_open_products_catalog_test
+      TEST_DB_USERNAME: open_products_test
+      TEST_DB_PASSWORD: open_products_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,7 +94,10 @@ jobs:
         shell: bash
         run: |
           if [ -f build.gradle ] || [ -f settings.gradle ] || [ -f gradlew ]; then
-            if ! gradle --no-daemon test; then
+            GRADLE=gradle
+            if [ -x ./gradlew ]; then GRADLE=./gradlew; fi
+            # check = tests + the jacoco LINE >= 0.85 gate.
+            if ! $GRADLE --no-daemon check; then
               if [ -f .ci/allow-gradle-fail ]; then
                 echo "Gradle test failed but .ci/allow-gradle-fail is present; continuing."
               else

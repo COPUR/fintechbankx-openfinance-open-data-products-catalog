@@ -3,8 +3,8 @@ pipeline {
     options { timestamps() }
 
     environment {
-        SERVICE_DIR = 'services/openfinance-open-products-service'
-        IMAGE_NAME = 'openfinance-open-products-service:' + (env.GIT_COMMIT ?: 'local')
+        SERVICE_DIR = '.'
+        IMAGE_NAME = 'open-products-catalog-service:' + (env.GIT_COMMIT ?: 'local')
         STRICT_DEPRECATED_ROOTS = 'true'
     }
 
@@ -59,12 +59,8 @@ pipeline {
                 sh '''
                   set -euo pipefail
                   if command -v docker >/dev/null 2>&1; then
-                    DOCKERFILE="${SERVICE_DIR}/infrastructure/Dockerfile"
-                    if [ -f "${DOCKERFILE}" ]; then
-                      docker build -t "${IMAGE_NAME}" -f "${DOCKERFILE}" "${SERVICE_DIR}"
-                    else
-                      docker build -t "${IMAGE_NAME}" "${SERVICE_DIR}"
-                    fi
+                    # Root Dockerfile builds from source (see deploy/helm for the chart).
+                    docker build -t "${IMAGE_NAME}" "${SERVICE_DIR}"
                   else
                     echo "docker not installed; skipping image build"
                   fi

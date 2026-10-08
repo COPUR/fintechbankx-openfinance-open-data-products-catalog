@@ -1,0 +1,75 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "products.name" . }}
+  namespace: {{ include "products.namespace" . }}
+  labels:
+    {{- include "products.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "products.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # API traffic only through the gateway.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.gatewayNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+    # Prometheus scrapes the management port.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.observabilityNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.managementPort }}
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Aurora PostgreSQL
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.databasePort }}
+      {{- with .Values.networkPolicy.databaseCidrs }}
+      to:
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      {{- end }}
+    # Keycloak JWKS (OIDC issuer)
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.oidcPort }}
+    # OTLP traces to the platform collector
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.observabilityNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.otlpPort }}
+    # Istio sidecar control plane (xDS, certificates)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 15012
+{{- end }}

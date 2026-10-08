@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "products.name" . }}
+  namespace: {{ include "products.namespace" . }}
+  labels:
+    {{- include "products.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "products.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+    - name: http-management
+      port: {{ .Values.service.managementPort }}
+      targetPort: management

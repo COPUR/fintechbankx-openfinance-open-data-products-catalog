@@ -1,0 +1,92 @@
+# Defaults are production-shaped (multi-replica, spread across zones).
+# Override per environment with values-<env>.yaml.
+
+# Platform contract: every svc-of-* service runs in the open-finance namespace.
+namespace: open-finance
+
+image:
+  repository: ""   # e.g. <account>.dkr.ecr.<region>.amazonaws.com/fintechbankx/open-products-catalog-service
+  tag: ""          # immutable tag (git SHA); never "latest"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+serviceAccount:
+  name: open-products-catalog-service
+  # IAM role from deploy/terraform output workload_role_arn (IRSA).
+  roleArn: ""
+
+podLabels:
+  app: open-products-catalog-service
+  app.kubernetes.io/part-of: fintechbankx-open-finance
+  fintechbankx.io/service-id: svc-of-open-products-catalog
+
+# Istio sidecar injection (mesh-wide STRICT mTLS is owned by the platform).
+mesh:
+  sidecarInject: true
+
+service:
+  port: 8080
+  managementPort: 8081
+
+# Read-only, cache-friendly catalogue: small requests, scales on CPU.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 768Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 65
+  targetMemoryUtilizationPercentage: 80
+
+podDisruptionBudget:
+  minAvailable: 1
+
+# Non-secret runtime settings, rendered into a ConfigMap.
+config:
+  DB_URL: ""                      # jdbc:postgresql://<aurora-writer-endpoint>:5432/db_of_open_products_catalog_<env>?sslmode=require
+  DB_USERNAME: open_products_catalog_app
+  DB_POOL_MAX: "10"
+  OIDC_ISSUER_URI: ""             # https://<identity-host>/realms/fintechbankx
+  OIDC_JWK_SET_URI: ""            # <issuer>/protocol/openid-connect/certs
+  OIDC_AUDIENCE: svc-of-open-products-catalog
+  OPEN_PRODUCTS_SEED_ENABLED: "false"
+  TRACING_ENABLED: "true"
+  TRACING_SAMPLING_PROBABILITY: "0.1"
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4318/v1/traces
+
+# Credentials synced from AWS Secrets Manager by External Secrets Operator.
+externalSecret:
+  enabled: true
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  # Secrets Manager secret <env>/open-products-catalog-service/db-app
+  # (deploy/terraform output app_db_secret_name).
+  remoteSecretName: ""
+  refreshInterval: 1h
+  # The catalogue makes no outbound authenticated calls, so the Keycloak
+  # client secret (<env>/open-products-catalog-service/oidc-client) is not
+  # mounted unless a future feature needs client credentials.
+  oidcClient:
+    enabled: false
+    remoteSecretName: ""
+
+networkPolicy:
+  enabled: true
+  # Callers: the Istio ingress gateway; Prometheus scrapes the management port.
+  gatewayNamespace: istio-ingress
+  observabilityNamespace: observability
+  # Egress beyond DNS: the Aurora endpoint, Keycloak JWKS, OTLP and istiod.
+  databasePort: 5432
+  databaseCidrs: []               # VPC subnets of the Aurora cluster, e.g. ["10.0.32.0/20"]
+  oidcPort: 443
+  otlpPort: 4318
+
+topologySpread:
+  maxSkew: 1
