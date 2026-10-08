@@ -52,6 +52,39 @@ class OpenProductsPostgresIT {
         jdbc.update("DELETE FROM " + SCHEMA + ".product WHERE product_id LIKE 'IT-%'");
     }
 
+    /**
+     * The adapter's own storage predicate, without the application's re-check:
+     * ACTIVE only, effective_from <= asOf < effective_to, and the type and
+     * segment filters, all applied by PostgreSQL.
+     */
+    @Test
+    void adapterNarrowsByStatusEffectiveWindowTypeAndSegmentInStorage() {
+        String asOf = "2026-06-01T00:00:00Z";
+        insert("IT-ACTIVE", "PCA", "ACTIVE", "2026-01-01T00:00:00Z", null);
+        insert("IT-STARTS-NOW", "PCA", "ACTIVE", asOf, null);
+        insert("IT-ENDS-LATER", "PCA", "ACTIVE", "2026-01-01T00:00:00Z", "2026-06-01T00:00:01Z");
+        insert("IT-ENDS-NOW", "PCA", "ACTIVE", "2026-01-01T00:00:00Z", asOf);
+        insert("IT-STARTS-LATER", "PCA", "ACTIVE", "2026-06-01T00:00:01Z", null);
+        insert("IT-DRAFT", "PCA", "DRAFT", "2026-01-01T00:00:00Z", null);
+        insert("IT-WITHDRAWN", "PCA", "WITHDRAWN", "2026-01-01T00:00:00Z", null);
+        insert("IT-LOAN", "LOAN", "ACTIVE", "2026-01-01T00:00:00Z", null);
+        insert("IT-ACTIVE-RETAIL", "PCA", "ACTIVE", "2026-01-01T00:00:00Z", null);
+        jdbc.update("UPDATE " + SCHEMA + ".product SET segment = 'RETAIL' WHERE product_id = 'IT-ACTIVE-RETAIL'");
+
+        ProductCatalogPort storage = ((SnapshotProductCatalog) catalogPort).delegate();
+        java.time.Instant at = java.time.Instant.parse(asOf);
+
+        assertThat(storage.findOfferable(new com.enterprise.openfinance.openproducts.domain.query.ListProductsQuery("pca", "sme"), at))
+            .extracting(e -> e.offer().productId())
+            .containsExactly("IT-ACTIVE", "IT-ENDS-LATER", "IT-STARTS-NOW", "SAMPLE-SME-PCA-01");
+        assertThat(storage.findOfferable(new com.enterprise.openfinance.openproducts.domain.query.ListProductsQuery(null, "RETAIL"), at))
+            .extracting(e -> e.offer().productId())
+            .containsExactly("IT-ACTIVE-RETAIL", "SAMPLE-PCA-001", "SAMPLE-SAV-001");
+        assertThat(storage.findOfferable(new com.enterprise.openfinance.openproducts.domain.query.ListProductsQuery("LOAN", null), at))
+            .extracting(e -> e.offer().productId())
+            .containsExactly("IT-LOAN", "SAMPLE-SME-LOAN-01");
+    }
+
     @Test
     void everyInsertAndUpdateIsRecordedInTheAppendOnlyHistory() {
         String user = jdbc.queryForObject("SELECT current_user", String.class);
