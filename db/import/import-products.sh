@@ -4,6 +4,7 @@
 #   - new product_id            -> inserted (version 0)
 #   - existing, values changed  -> updated, updated_at = now(), version + 1
 #   - existing, values the same -> untouched (ETag stays stable)
+# Ids starting with SAMPLE- are reserved for the dev/CI seed and rejected.
 # Products missing from the CSV are left as they are; withdraw a product by
 # importing it with status WITHDRAWN (or an effective_to), never by deleting.
 # The whole file is applied in one transaction: any bad row aborts the import.
@@ -83,6 +84,13 @@ BEGIN
       FROM (SELECT product_id FROM product_import GROUP BY product_id HAVING count(*) > 1) d;
     IF dup IS NOT NULL THEN
         RAISE EXCEPTION 'duplicate product_id in CSV: %', dup;
+    END IF;
+    -- SAMPLE- ids belong to the dev/CI seed; the real catalogue never uses them.
+    SELECT string_agg(product_id, ', ') INTO dup
+      FROM product_import
+     WHERE upper(product_id) LIKE 'SAMPLE-%';
+    IF dup IS NOT NULL THEN
+        RAISE EXCEPTION 'product_id in the reserved SAMPLE- namespace: %', dup;
     END IF;
     -- Money is never rounded on import: more than two decimals is an error.
     SELECT string_agg(product_id, ', ') INTO dup

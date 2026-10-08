@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Rehearses svc-of-open-products-catalog's data path on a scratch PostgreSQL:
 #   1. applies the Flyway schema migration(s) to a fresh database,
-#   2. applies the dev/CI seed callback twice (idempotent),
+#   2. applies the dev/CI seed callback twice (insert-only, SAMPLE- ids),
 #   3. imports db/import/products.example.csv twice (second run changes nothing),
 #   4. imports a changed CSV (one product updated, version and updated_at move),
-#   5. checks a bad CSV is rejected as a whole.
+#   5. checks a bad CSV is rejected as a whole, and SAMPLE- ids are refused,
+#   6. imports, then seeds, and checks every imported value survives the seed.
 # There is no monolith data to backfill (ADR-0001), so there is no source DB.
 #
 # Needs psql and a role that can create databases, via the usual PG* env vars
@@ -40,8 +41,8 @@ for run in 1 2; do
   echo "--- seed run $run"
   PGOPTIONS="-c search_path=$schema" psql_q -d "$db" -f "$root/src/main/resources/db/seed/afterMigrate__sample_products.sql"
 done
-check "seed loads four sample products at version 0" \
-  "SELECT count(*) || ' ' || max(version) FROM $schema.product" "4 0"
+check "seed loads four SAMPLE- products at version 0" \
+  "SELECT count(*) || ' ' || max(version) FROM $schema.product WHERE product_id LIKE 'SAMPLE-%'" "4 0"
 
 psql_q -d "$db" -c "TRUNCATE $schema.product"
 
@@ -80,6 +81,30 @@ if "$root/db/import/import-products.sh" "dbname=$db" "$work/bad.csv" 2> "$work/b
 fi
 grep -q "more than two decimals" "$work/bad.err" || { cat "$work/bad.err" >&2; exit 1; }
 check "a rejected file changes nothing" "SELECT count(*) FROM $schema.product WHERE product_id = 'NEW-001'" "0"
+
+{ head -n 1 "$root/db/import/products.example.csv"
+  echo "sample-PCA-001,PCA,RETAIL,Not a sample,,AED,9.00,0.00,,ACTIVE,2026-05-01T00:00:00Z,"
+} > "$work/sample.csv"
+if "$root/db/import/import-products.sh" "dbname=$db" "$work/sample.csv" 2> "$work/sample.err"; then
+  echo "FAIL import accepted a SAMPLE- product id" >&2
+  exit 1
+fi
+grep -q "reserved SAMPLE- namespace" "$work/sample.err" || { cat "$work/sample.err" >&2; exit 1; }
+echo "ok   import refuses SAMPLE- ids"
+
+# The dev seed must never revert an imported catalogue: import, then seed, then
+# the imported values (and their version/updated_at) must be unchanged.
+sed 's/^SME-PCA-01,PCA,SME,SME Current,Business current account,AED,35.00/SME-PCA-01,PCA,SME,SME Current,Business current account,AED,25.00/' \
+  "$root/db/import/products.example.csv" > "$work/imported.csv"
+"$root/db/import/import-products.sh" "dbname=$db" "$work/imported.csv" > /dev/null
+imported="$(psql -X -At -d "$db" -c "SELECT string_agg(product_id || ':' || monthly_fee_amount || ':' || version || ':' || updated_at, ',' ORDER BY product_id) FROM $schema.product WHERE product_id NOT LIKE 'SAMPLE-%'")"
+echo "--- seed after import"
+PGOPTIONS="-c search_path=$schema" psql_q -d "$db" -f "$root/src/main/resources/db/seed/afterMigrate__sample_products.sql"
+check "seed after import leaves every imported row as imported" \
+  "SELECT string_agg(product_id || ':' || monthly_fee_amount || ':' || version || ':' || updated_at, ',' ORDER BY product_id) FROM $schema.product WHERE product_id NOT LIKE 'SAMPLE-%'" \
+  "$imported"
+check "imported fee survives the seed" \
+  "SELECT monthly_fee_amount FROM $schema.product WHERE product_id = 'SME-PCA-01'" "25.00"
 
 psql_q -d postgres -c "DROP DATABASE $db"
 echo "Migration, seed and import rehearsal passed."

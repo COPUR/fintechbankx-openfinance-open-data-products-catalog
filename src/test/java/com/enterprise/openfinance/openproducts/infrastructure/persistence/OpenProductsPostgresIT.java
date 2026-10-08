@@ -73,7 +73,7 @@ class OpenProductsPostgresIT {
 
         assertThat(applied).containsExactly("1:create product catalogue");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM " + SCHEMA
-            + ".product WHERE product_id IN ('PCA-001', 'SAV-001', 'SME-LOAN-01', 'SME-PCA-01')", Integer.class))
+            + ".product WHERE product_id IN ('SAMPLE-PCA-001', 'SAMPLE-SAV-001', 'SAMPLE-SME-LOAN-01', 'SAMPLE-SME-PCA-01')", Integer.class))
             .isEqualTo(4);
     }
 
@@ -84,7 +84,7 @@ class OpenProductsPostgresIT {
             .andExpect(header().string("Cache-Control", "no-cache"))
             .andExpect(jsonPath("$.Meta.TotalRecords").value(4))
             .andExpect(jsonPath("$.Data.Product[*].ProductId").value(
-                org.hamcrest.Matchers.contains("PCA-001", "SAV-001", "SME-LOAN-01", "SME-PCA-01")))
+                org.hamcrest.Matchers.contains("SAMPLE-PCA-001", "SAMPLE-SAV-001", "SAMPLE-SME-LOAN-01", "SAMPLE-SME-PCA-01")))
             .andExpect(jsonPath("$.Data.Product[3].MonthlyFee").value("35.00"))
             .andExpect(jsonPath("$.Data.Product[3].Currency").value("AED"))
             .andExpect(jsonPath("$.Data.Product[2].AnnualRate").value("6.75"))
@@ -96,11 +96,11 @@ class OpenProductsPostgresIT {
         mvc.perform(get("/open-finance/v1/products?type=pca&segment=sme").header("X-FAPI-Interaction-ID", "pg-002"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.Meta.TotalRecords").value(1))
-            .andExpect(jsonPath("$.Data.Product[0].ProductId").value("SME-PCA-01"));
+            .andExpect(jsonPath("$.Data.Product[0].ProductId").value("SAMPLE-SME-PCA-01"));
 
         mvc.perform(get("/open-finance/v1/products?segment=SME").header("X-FAPI-Interaction-ID", "pg-003"))
             .andExpect(jsonPath("$.Data.Product[*].ProductId").value(
-                org.hamcrest.Matchers.contains("SME-LOAN-01", "SME-PCA-01")));
+                org.hamcrest.Matchers.contains("SAMPLE-SME-LOAN-01", "SAMPLE-SME-PCA-01")));
     }
 
     @Test
@@ -114,7 +114,7 @@ class OpenProductsPostgresIT {
         mvc.perform(get("/open-finance/v1/products?segment=sme&type=PCA").header("X-FAPI-Interaction-ID", "pg-004"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.Data.Product[*].ProductId").value(
-                org.hamcrest.Matchers.contains("IT-ACTIVE", "SME-PCA-01")))
+                org.hamcrest.Matchers.contains("IT-ACTIVE", "SAMPLE-SME-PCA-01")))
             .andExpect(jsonPath("$.Data.Product[0].MonthlyFee").value("12.50"))
             .andExpect(jsonPath("$.Data.Product[0].AnnualRate").value("3.10"));
     }

@@ -34,7 +34,8 @@ So there is **no monolith catalogue data to backfill**.
    upserts a CSV in one transaction (new rows inserted, changed rows updated
    with `version + 1`, unchanged rows left alone). The four former in-memory
    rows are dev/CI sample data in `classpath:db/seed`, applied only when
-   `OPEN_PRODUCTS_SEED_ENABLED=true`.
+   `OPEN_PRODUCTS_SEED_ENABLED=true`. The seed is insert-only and uses
+   `SAMPLE-` ids, which the import refuses, so it can never change imported data.
 3. The service has no write use case, so it raises no domain events. **No
    transactional outbox** and **no `evt.of.products.*` topics** for now. When a
    write or import use case exists in the service, add the outbox (shared brief,
