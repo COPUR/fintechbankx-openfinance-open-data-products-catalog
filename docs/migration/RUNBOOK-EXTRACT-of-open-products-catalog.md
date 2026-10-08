@@ -143,7 +143,7 @@ service, not returning traffic to the monolith.
 
 ## 5. Acceptance checklist
 
-- [x] Builds and tests standalone, including PostgreSQL integration tests (skipped without `TEST_DB_URL`)
+- [x] Builds and tests standalone, including PostgreSQL integration tests (skipped locally without `TEST_DB_URL`; they fail in CI and Jenkins without it)
 - [x] Own schema and migrations; Hibernate validates the entity at startup
 - [x] Idempotent catalogue import rehearsed in CI
 - [x] Container image, Helm chart, Terraform checked in the Deployability workflow

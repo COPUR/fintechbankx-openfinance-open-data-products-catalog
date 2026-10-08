@@ -35,8 +35,33 @@ pipeline {
         }
         stage('Quality Gate') {
             steps {
+                // The PostgreSQL integration tests fail (not skip) under Jenkins
+                // without TEST_DB_URL, so provide a throwaway postgres:16 unless
+                // the agent already supplies TEST_DB_URL.
                 sh '''
                   set -euo pipefail
+                  if [ -z "${TEST_DB_URL:-}" ]; then
+                    if ! command -v docker >/dev/null 2>&1; then
+                      echo "Quality Gate needs PostgreSQL: set TEST_DB_URL/TEST_DB_USERNAME/TEST_DB_PASSWORD or install docker on the agent" >&2
+                      exit 1
+                    fi
+                    db_container="products-qg-${BUILD_TAG:-local}-$$"
+                    db_secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')"
+                    trap 'docker rm -f "$db_container" >/dev/null 2>&1 || true' EXIT
+                    docker run -d --name "$db_container" -p 127.0.0.1::5432 \\
+                      -e POSTGRES_DB=db_of_open_products_catalog_test \\
+                      -e POSTGRES_USER=open_products_test \\
+                      -e POSTGRES_PASSWORD="$db_secret" postgres:16-alpine >/dev/null
+                    for _ in $(seq 1 60); do
+                      docker exec "$db_container" pg_isready -U open_products_test -d db_of_open_products_catalog_test >/dev/null 2>&1 && break
+                      sleep 1
+                    done
+                    docker exec "$db_container" pg_isready -U open_products_test -d db_of_open_products_catalog_test
+                    db_port="$(docker port "$db_container" 5432/tcp | head -n 1 | sed 's/.*://')"
+                    export TEST_DB_URL="jdbc:postgresql://127.0.0.1:${db_port}/db_of_open_products_catalog_test"
+                    export TEST_DB_USERNAME=open_products_test
+                    export TEST_DB_PASSWORD="$db_secret"
+                  fi
                   ./gradlew -p "${SERVICE_DIR}" --no-daemon clean check
                 '''
             }
