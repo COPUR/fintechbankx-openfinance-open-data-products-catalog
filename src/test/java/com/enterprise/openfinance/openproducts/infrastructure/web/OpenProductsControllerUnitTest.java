@@ -36,13 +36,14 @@ class OpenProductsControllerUnitTest {
             new ProductOffer("PCA-001", "Everyday Current", "PCA", "RETAIL", "AED", "0.00", "0.00", Instant.parse("2026-03-01T00:00:00Z"))
         )));
 
-        mockMvc.perform(get("/open-finance/v1/products")
+        mockMvc.perform(get("/open-finance/v1/products?type=pca")
                 .header("X-FAPI-Interaction-ID", "it-001"))
             .andExpect(status().isOk())
             .andExpect(header().exists("ETag"))
-            .andExpect(header().string("Cache-Control", "max-age=60, public"))
+            .andExpect(header().string("Cache-Control", "no-cache"))
             .andExpect(header().string("X-FAPI-Interaction-ID", "it-001"))
             .andExpect(jsonPath("$.Data.Product[0].ProductId").value("PCA-001"))
+            .andExpect(jsonPath("$.Links.Self").value("/open-finance/v1/products?type=pca"))
             .andExpect(jsonPath("$.Meta.TotalRecords").value(1));
     }
 
@@ -62,7 +63,16 @@ class OpenProductsControllerUnitTest {
                 .header("X-FAPI-Interaction-ID", "it-001")
                 .header("If-None-Match", etag))
             .andExpect(status().isNotModified())
+            .andExpect(header().string("Cache-Control", "no-cache"))
+            .andExpect(header().string("X-FAPI-Interaction-ID", "it-001"))
             .andExpect(header().string("X-OF-Cache", "HIT"));
+    }
+
+    @Test
+    void selfLinkIsRelativeAndBuiltFromTheFiltersOnly() {
+        org.assertj.core.api.Assertions.assertThat(OpenProductsController.selfLink(null, " ")).isEqualTo("/open-finance/v1/products");
+        org.assertj.core.api.Assertions.assertThat(OpenProductsController.selfLink(null, " sme ")).isEqualTo("/open-finance/v1/products?segment=sme");
+        org.assertj.core.api.Assertions.assertThat(OpenProductsController.selfLink("PCA", "SME")).isEqualTo("/open-finance/v1/products?type=PCA&segment=SME");
     }
 
     @Test

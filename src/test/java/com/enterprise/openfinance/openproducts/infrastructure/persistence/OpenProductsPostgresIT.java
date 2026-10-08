@@ -79,7 +79,7 @@ class OpenProductsPostgresIT {
     void servesTheSeededCatalogueFromPostgresOrderedByProductId() throws Exception {
         mvc.perform(get("/open-finance/v1/products").header("X-FAPI-Interaction-ID", "pg-001"))
             .andExpect(status().isOk())
-            .andExpect(header().string("Cache-Control", "max-age=60, public"))
+            .andExpect(header().string("Cache-Control", "no-cache"))
             .andExpect(jsonPath("$.Meta.TotalRecords").value(4))
             .andExpect(jsonPath("$.Data.Product[*].ProductId").value(
                 org.hamcrest.Matchers.contains("PCA-001", "SAV-001", "SME-LOAN-01", "SME-PCA-01")))

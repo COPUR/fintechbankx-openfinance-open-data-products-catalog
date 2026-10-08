@@ -4,13 +4,11 @@ import com.enterprise.openfinance.openproducts.domain.model.ProductOffer;
 import com.enterprise.openfinance.openproducts.domain.port.in.OpenProductsUseCase;
 import com.enterprise.openfinance.openproducts.domain.query.ListProductsQuery;
 import com.enterprise.openfinance.openproducts.infrastructure.web.dto.ProductListResponse;
-import jakarta.servlet.http.HttpServletRequest;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -19,12 +17,19 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.util.UriUtils;
 
 @RestController
 public class OpenProductsController {
 
-    /** Public catalogue data: shared caches may keep it briefly; ETag revalidation keeps it cheap. */
-    static final CacheControl CACHE_CONTROL = CacheControl.maxAge(60, TimeUnit.SECONDS).cachePublic();
+    static final String PRODUCTS_PATH = "/open-finance/v1/products";
+
+    /**
+     * Every response echoes the caller's X-FAPI-Interaction-ID, so no cache may
+     * reuse it without asking: no-cache forces revalidation with If-None-Match,
+     * which the ETag makes cheap (304 without a body).
+     */
+    static final CacheControl CACHE_CONTROL = CacheControl.noCache();
 
     private final OpenProductsUseCase openProductsUseCase;
 
@@ -32,13 +37,12 @@ public class OpenProductsController {
         this.openProductsUseCase = openProductsUseCase;
     }
 
-    @GetMapping("/open-finance/v1/products")
+    @GetMapping(PRODUCTS_PATH)
     public ResponseEntity<ProductListResponse> listProducts(
         @RequestHeader("X-FAPI-Interaction-ID") String interactionId,
         @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch,
         @RequestParam(value = "type", required = false) String type,
-        @RequestParam(value = "segment", required = false) String segment,
-        HttpServletRequest request
+        @RequestParam(value = "segment", required = false) String segment
     ) {
         List<ProductOffer> products = openProductsUseCase.listProducts(new ListProductsQuery(type, segment)).products();
         String eTag = toEtag(products);
@@ -54,7 +58,7 @@ public class OpenProductsController {
 
         ProductListResponse response = new ProductListResponse(
             new ProductListResponse.DataBlock(products.stream().map(this::toItem).toList()),
-            new ProductListResponse.LinksBlock(buildSelfLink(request)),
+            new ProductListResponse.LinksBlock(selfLink(type, segment)),
             new ProductListResponse.MetaBlock(products.size())
         );
 
@@ -79,10 +83,26 @@ public class OpenProductsController {
         );
     }
 
-    private String buildSelfLink(HttpServletRequest request) {
-        String base = request.getRequestURL().toString();
-        String query = request.getQueryString();
-        return query == null ? base : base + "?" + query;
+    /**
+     * A relative link built from the filters only, as in the monolith. Host,
+     * scheme, port and prefix are never taken from the request, so forwarded
+     * headers cannot change the body.
+     */
+    static String selfLink(String type, String segment) {
+        StringBuilder query = new StringBuilder();
+        appendFilter(query, "type", type);
+        appendFilter(query, "segment", segment);
+        return query.isEmpty() ? PRODUCTS_PATH : PRODUCTS_PATH + "?" + query;
+    }
+
+    private static void appendFilter(StringBuilder query, String name, String value) {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        if (!query.isEmpty()) {
+            query.append('&');
+        }
+        query.append(name).append('=').append(UriUtils.encodeQueryParam(value.trim(), StandardCharsets.UTF_8));
     }
 
     static String toEtag(List<ProductOffer> products) {

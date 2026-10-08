@@ -42,4 +42,36 @@ class OpenProductsApiIntegrationTest {
         assertThat(response.getBody().data().products())
             .allMatch(p -> "SME".equals(p.segment()));
     }
+
+    /**
+     * Defence in depth against cache poisoning: the platform ingress overwrites
+     * X-Forwarded-*, but if a forged value ever reached the service it must not
+     * appear in the body or in any header, and the response must not be stored
+     * by shared caches.
+     */
+    @Test
+    void forgedForwardedHeadersNeverReachTheResponse() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.add("X-FAPI-Interaction-ID", "it-int-002");
+        headers.add("X-Forwarded-Host", "evil.example");
+        headers.add("X-Forwarded-Proto", "https");
+        headers.add("X-Forwarded-Port", "443");
+        headers.add("X-Forwarded-Prefix", "/evil.example");
+        headers.add("Forwarded", "host=evil.example;proto=https");
+
+        ResponseEntity<String> response = restTemplate.exchange(
+            "http://localhost:" + port + "/open-finance/v1/products?type=PCA&segment=SME",
+            HttpMethod.GET,
+            new HttpEntity<>(headers),
+            String.class
+        );
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(response.getBody()).doesNotContain("evil.example");
+        response.getHeaders().forEach((name, values) ->
+            assertThat(values).as("header %s", name).noneMatch(v -> v.contains("evil.example")));
+        assertThat(response.getBody()).contains("\"Self\":\"/open-finance/v1/products?type=PCA&segment=SME\"");
+        assertThat(response.getHeaders().getCacheControl()).isEqualTo("no-cache");
+        assertThat(response.getHeaders().getFirst("X-FAPI-Interaction-ID")).isEqualTo("it-int-002");
+    }
 }

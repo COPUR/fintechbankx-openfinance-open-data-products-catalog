@@ -24,8 +24,10 @@ ingress gateway. Everything here is **Proposed** until the owning squad deploys 
   not cause restart loops.
 - Aurora Serverless v2 with a reader in a second AZ in prod (`aurora_instance_count = 2`),
   35-day point-in-time recovery, deletion protection.
-- Clients and the gateway can keep serving cached responses (`Cache-Control: public, max-age=60`)
-  through short database interruptions.
+- Responses carry `Cache-Control: no-cache` and a strong `ETag`: they echo the
+  caller's `X-FAPI-Interaction-ID`, so no shared cache may reuse them without
+  revalidating, and `Links.Self` is a relative path that forwarded headers
+  cannot change (the ingress also overwrites `X-Forwarded-*`).
 
 ## Security
 
