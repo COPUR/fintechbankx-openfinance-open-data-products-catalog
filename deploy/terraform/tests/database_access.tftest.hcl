@@ -72,3 +72,44 @@ run "refuses_the_workload_group_as_operator_source" {
 
   expect_failures = [aws_vpc_security_group_ingress_rule.postgres_from_operator]
 }
+
+# The schema owner can disable the history triggers; its DDL must leave a
+# trace that someone is told about (ADR-0001: tamper-evident against the
+# runtime and import roles, detected for the owner).
+run "owner_ddl_is_logged_and_alarmed" {
+  command = plan
+
+  variables {
+    alarm_topic_arn = "arn:aws:sns:me-central-1:111122223333:open-finance-oncall"
+  }
+
+  assert {
+    condition = anytrue([
+      for p in aws_rds_cluster_parameter_group.database.parameter : p.name == "log_statement" && p.value == "ddl"
+    ])
+    error_message = "Aurora must log every DDL statement (log_statement=ddl)."
+  }
+
+  assert {
+    condition     = contains(aws_rds_cluster.database.enabled_cloudwatch_logs_exports, "postgresql")
+    error_message = "PostgreSQL logs must reach CloudWatch for the DDL alarm."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_log_group.postgresql.name == "/aws/rds/cluster/dev-open-products-catalog-service-aurora/postgresql"
+    error_message = "The log group must be the one RDS exports the cluster's PostgreSQL log to."
+  }
+
+  assert {
+    condition = alltrue([
+      for term in ["DISABLE TRIGGER", "disable trigger", "DROP TRIGGER", "drop trigger", "product_history_record", "append-only"] :
+      strcontains(aws_cloudwatch_log_metric_filter.history_tamper.pattern, term)
+    ])
+    error_message = "The metric filter must catch disabled or dropped triggers, a replaced history function and rejected history changes."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_metric_alarm.history_tamper.threshold == 1 && aws_cloudwatch_metric_alarm.history_tamper.alarm_actions == toset(["arn:aws:sns:me-central-1:111122223333:open-finance-oncall"])
+    error_message = "One matching log line must page the on-call topic."
+  }
+}
