@@ -16,10 +16,16 @@
 # offset (2026-03-01T00:00:00Z or +04:00); they are stored as instants.
 # The whole file is applied in one transaction: any bad row aborts the import.
 # Every inserted or updated row is recorded in product_history (V2 trigger)
-# with the role and application_name "import-products/<operator>".
+# with the role, application_name "import-products/<operator>" and, since V3,
+# operator_arn: the AWS caller identity of whoever runs this script, taken
+# from `aws sts get-caller-identity` (the same credentials that fetched the
+# db-import secret, so CloudTrail's GetSecretValue event names the same
+# principal). The script refuses to run without it, and the database refuses
+# changes as the import role that carry none.
 #
 #   IMPORT_OPERATOR=<your id> db/import/import-products.sh [--full|--delta] <conninfo> <products.csv>
 #
+# Needs the AWS CLI with the operator's own credentials (SSO or role session).
 # Runs only as the import role (open_products_catalog_import, credential in
 # <env>/open-products-catalog-service/db-import), which may SELECT, INSERT and
 # UPDATE product but not DELETE. Example conninfo:
@@ -63,6 +69,16 @@ if ! [[ "$operator" =~ ^[A-Za-z0-9._@-]{1,40}$ ]]; then
   echo "set IMPORT_OPERATOR to your operator id (1-40 of A-Z a-z 0-9 . _ @ -)" >&2
   exit 2
 fi
+# Who is running the import, as AWS knows it (never typed by the operator).
+if ! operator_arn="$(aws sts get-caller-identity --query Arn --output text 2> /dev/null)"; then
+  echo "cannot read your AWS caller identity (aws sts get-caller-identity); sign in with your operator credentials first" >&2
+  exit 2
+fi
+if ! [[ "$operator_arn" =~ ^arn:aws[a-z-]*:(sts|iam)::[0-9]{12}:(assumed-role|user|federated-user)/[A-Za-z0-9+=,.@_/-]+$ ]]; then
+  echo "refusing AWS caller identity '$operator_arn': use your own operator principal, never the account root" >&2
+  exit 2
+fi
+echo "importing as AWS principal $operator_arn" >&2
 expected_header="product_id,product_type,segment,name,description,currency,monthly_fee_amount,annual_rate_percent,eligibility,status,effective_from,effective_to"
 if [ "$(head -n 1 "$csv" | tr -d '\r')" != "$expected_header" ]; then
   echo "unexpected CSV header; expected: $expected_header" >&2
@@ -71,11 +87,13 @@ fi
 
 # psql reads the CSV client-side (\copy), so the file never has to be on the DB host.
 csv_literal="${csv//\'/\'\'}"
-psql -X -q -v ON_ERROR_STOP=1 -v app_name="import-products/$operator" -v mode="$mode" "$target_db" <<SQL
+psql -X -q -v ON_ERROR_STOP=1 -v app_name="import-products/$operator" -v operator_arn="$operator_arn" -v mode="$mode" "$target_db" <<SQL
 \set QUIET on
 BEGIN;
 SET LOCAL search_path = $schema;
 SET LOCAL application_name = :'app_name';
+-- Read by the product_history trigger (V3) into operator_arn.
+SET LOCAL fbx.operator_arn = :'operator_arn';
 SET LOCAL TimeZone = 'UTC';
 
 -- Only the import role may load the catalogue (never the owner or an admin).
