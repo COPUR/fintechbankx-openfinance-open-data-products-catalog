@@ -140,6 +140,23 @@ class OpenProductsPostgresIT {
             + " WHERE product_id = 'IT-ARN' ORDER BY history_id DESC LIMIT 1", String.class)).isEqualTo(arn);
     }
 
+    /** Only the history trigger writes the history; deleting a product is recorded too. */
+    @Test
+    void historyCannotBeForgedAndDeletesAreRecorded() {
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA + ".product_history (product_id, operation, new_row,"
+                + " changed_by, login_role, application_name, transaction_id, changed_at)"
+                + " VALUES ('IT-FORGED', 'INSERT', '{}', 'x', 'x', 'x', 0, now())"))
+            .hasMessageContaining("only the history trigger");
+
+        insert("IT-DEL", "PCA", "ACTIVE", "2026-01-01T00:00:00Z", null);
+        jdbc.update("DELETE FROM " + SCHEMA + ".product WHERE product_id = 'IT-DEL'");
+
+        assertThat(jdbc.queryForList("SELECT operation || ':' || coalesce(old_row->>'product_id', '-') || ':'"
+                + " || coalesce(new_row->>'product_id', '-') FROM " + SCHEMA + ".product_history"
+                + " WHERE product_id = 'IT-DEL' ORDER BY history_id", String.class))
+            .containsExactly("INSERT:-:IT-DEL", "DELETE:IT-DEL:-");
+    }
+
     private void insert(String id, String type, String status, String from, String to) {
         jdbc.update("INSERT INTO " + SCHEMA + ".product (product_id, product_type, segment, name, currency,"
                 + " monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from, effective_to, updated_at)"

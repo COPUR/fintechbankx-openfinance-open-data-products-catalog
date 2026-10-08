@@ -18,7 +18,10 @@
 #      cannot change products without one,
 #  10. checks the schema owner cannot disable, drop or replace the history's
 #      triggers, functions or table, however the DDL is spelled or nested
-#      (review probes), and that the triggers and function bodies are intact.
+#      (review probes), and that the triggers and function bodies are intact,
+#  11. checks the history cannot be forged or bypassed by the owner: direct
+#      inserts into product_history are refused, deleting a product is
+#      recorded, and no new trigger on product may write the history.
 # There is no monolith data to backfill (ADR-0001), so there is no source DB.
 #
 # Needs psql and a superuser (it creates roles and a database), via the usual
@@ -297,13 +300,29 @@ check "the history keeps old and new values of each update" \
   "SELECT string_agg((old_row->>'monthly_fee_amount') || '->' || (new_row->>'monthly_fee_amount'), ',' ORDER BY history_id) FROM $schema.product_history WHERE product_id = 'SME-PCA-01' AND operation = 'UPDATE'" \
   "35.00->30.00,30.00->25.00"
 
+echo "--- schema owner cannot forge or bypass the history (V4)"
+if as_owner psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET search_path = $schema" \
+     -c "INSERT INTO product_history (product_id, operation, new_row, changed_by, login_role, application_name, transaction_id, changed_at) VALUES ('FORGED', 'INSERT', '{}', 'x', 'x', 'x', 0, now())" 2> "$work/forge.err"; then
+  echo "FAIL the schema owner inserted a forged history row" >&2
+  exit 1
+fi
+grep -q "only the history trigger" "$work/forge.err" || { cat "$work/forge.err" >&2; exit 1; }
+echo "ok   direct inserts into product_history are refused, also for the owner"
+check "no forged row reached the history" "SELECT count(*) FROM $schema.product_history WHERE product_id = 'FORGED'" "0"
+as_owner psql_q -d "$db" -c "SET search_path = $schema" \
+  -c "INSERT INTO product (product_id, product_type, segment, name, currency, monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from, updated_at) VALUES ('DEL-001', 'PCA', 'RETAIL', 'To delete', 'AED', 1.00, 'AED', 0.00, 'ACTIVE', '2026-05-01T00:00:00Z', now())" \
+  -c "DELETE FROM product WHERE product_id = 'DEL-001'"
+check "deleting a product is recorded with its last values" \
+  "SELECT string_agg(operation || ':' || coalesce(old_row->>'name', '-') || ':' || coalesce(new_row->>'name', '-') || ':' || changed_by, ',' ORDER BY history_id) FROM $schema.product_history WHERE product_id = 'DEL-001'" \
+  "INSERT:-:To delete:$owner,DELETE:To delete:-:$owner"
+
 echo "--- schema owner cannot tamper with the history (review probes)"
 integrity_sql="SELECT string_agg(t.tgname || ':' || t.tgenabled::text || ':' || md5(p.prosrc), ',' ORDER BY t.tgname)
   FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
  WHERE t.tgrelid IN ('$schema.product'::regclass, '$schema.product_history'::regclass) AND NOT t.tgisinternal"
 intact="$(psql -X -At -d "$db" -c "$integrity_sql")"
 case "$intact" in
-  trg_product_history:O:*,trg_product_history_no_change:O:*,trg_product_history_no_truncate:O:*) ;;
+  trg_product_history:O:*,trg_product_history_delete:O:*,trg_product_history_insert_guard:O:*,trg_product_history_no_change:O:*,trg_product_history_no_truncate:O:*) ;;
   *) echo "FAIL history triggers before the probes: $intact" >&2; exit 1 ;;
 esac
 refused "probe 1: replace the append-only function to return OLD" \
@@ -329,6 +348,13 @@ refused "drop a history column" "ALTER TABLE product_history DROP COLUMN operato
 refused "a rule that swallows history inserts" "CREATE RULE skip_history AS ON INSERT TO product_history DO INSTEAD NOTHING"
 refused "a new trigger on the history" \
   'CREATE FUNCTION skip_row() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NULL; END $f$; CREATE TRIGGER trg_skip BEFORE INSERT ON product_history FOR EACH ROW EXECUTE FUNCTION skip_row()'
+refused "a new trigger on product that could write forged history" \
+  'CREATE FUNCTION forge_row() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NULL; END $f$; CREATE TRIGGER trg_forge AFTER UPDATE ON product FOR EACH ROW EXECUTE FUNCTION forge_row()'
+refused "drop the insert guard on the history" "DROP TRIGGER trg_product_history_insert_guard ON product_history"
+refused "replace the insert-guard function" \
+  'CREATE OR REPLACE FUNCTION product_history_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NEW; END $f$'
+refused "drop the delete-recording trigger" "DROP TRIGGER trg_product_history_delete ON product"
+refused "disable the delete-recording trigger" "ALTER TABLE product DISABLE TRIGGER trg_product_history_delete"
 check "history triggers enabled and function bodies unchanged after the probes" "$integrity_sql" "$intact"
 as_owner psql_q -d "$db" -c "SET search_path = $schema" -c "ALTER TABLE product ADD COLUMN guard_probe int" -c "ALTER TABLE product DROP COLUMN guard_probe"
 echo "ok   other DDL by the schema owner (future migrations) still runs"
