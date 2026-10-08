@@ -36,3 +36,8 @@ output "master_user_secret_arn" {
 output "log_group_name" {
   value = module.service_base.cloudwatch_log_group_name
 }
+
+output "postgresql_log_group_arn" {
+  description = "PostgreSQL log group (pgaudit, guard messages). Read access belongs to the security and DBA roles only; scope their IAM read grants (logs:GetLogEvents, FilterLogEvents, StartQuery) to this ARN."
+  value       = aws_cloudwatch_log_group.postgresql.arn
+}

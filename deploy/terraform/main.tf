@@ -109,13 +109,26 @@ resource "aws_rds_cluster_parameter_group" "database" {
     value = "500"
   }
 
-  # Every DDL statement is logged, so the schema owner disabling or dropping
-  # the product_history triggers leaves a trace (alarm below, ADR-0001).
-  # Passwords are therefore set with psql \password (runbook section 2), which
-  # sends only a SCRAM verifier, never a plain-text PASSWORD '...'.
+  # Top-level DDL statements are logged. pgaudit (below) also logs DDL nested
+  # in DO blocks and functions, with the object's qualified name. Role
+  # passwords are set in a session with logging off (runbook section 2.2).
   parameter {
     name  = "log_statement"
     value = "ddl"
+  }
+
+  # pgaudit: session audit of DDL and role statements. The extension itself
+  # is created by the DBA bootstrap (CREATE EXTENSION pgaudit). Loading a
+  # library needs a reboot of the instances.
+  parameter {
+    name         = "shared_preload_libraries"
+    value        = "pg_stat_statements,pgaudit"
+    apply_method = "pending-reboot"
+  }
+
+  parameter {
+    name  = "pgaudit.log"
+    value = "ddl,role"
   }
 }
 
@@ -290,17 +303,18 @@ resource "aws_cloudwatch_metric_alarm" "aurora_connections" {
   alarm_actions       = var.alarm_topic_arn == "" ? [] : [var.alarm_topic_arn]
 }
 
-# Tamper detection for the append-only history: the schema owner can still
-# disable or drop its triggers or replace the history function (DDL, logged
-# by log_statement=ddl), and any role's rejected UPDATE, DELETE or TRUNCATE of
-# product_history logs "append-only". Terms are case-sensitive: lower- and
-# upper-case DDL are matched, mixed case is not (pgaudit would close that; see
-# ADR-0001). A migration that replaces product_history_record also fires it,
-# which is expected and reviewed with the release.
+# Tamper detection for the append-only history. The history guard
+# (db/bootstrap/history-guard.sql) prevents the schema owner's DDL on it; this
+# alarm reports every refusal and a disarmed guard (both log
+# "product_history guard"), any DDL that reaches the history table or its two
+# functions (pgaudit AUDIT lines carry the qualified object name, whatever the
+# statement's spelling and also inside DO/EXECUTE), and rejected UPDATE,
+# DELETE or TRUNCATE of product_history ("append-only"). A reviewed migration
+# that changes the history under break-glass fires it too, as intended.
 resource "aws_cloudwatch_log_metric_filter" "history_tamper" {
   name           = "${local.name}-history-tamper"
   log_group_name = aws_cloudwatch_log_group.postgresql.name
-  pattern        = "?\"DISABLE TRIGGER\" ?\"disable trigger\" ?\"DROP TRIGGER\" ?\"drop trigger\" ?\"product_history_record\" ?\"append-only\""
+  pattern        = "?\"product_history guard\" ?\"sc_of_open_products_catalog.product_history\" ?\"append-only\""
 
   metric_transformation {
     name          = "ProductHistoryTamperSignals"
@@ -312,7 +326,7 @@ resource "aws_cloudwatch_log_metric_filter" "history_tamper" {
 
 resource "aws_cloudwatch_metric_alarm" "history_tamper" {
   alarm_name          = "${local.name}-history-tamper"
-  alarm_description   = "A trigger was disabled or dropped, the history function replaced, or a product_history change rejected. Check the PostgreSQL log and product_history; expected only during a reviewed migration."
+  alarm_description   = "The product_history guard refused DDL or was disarmed, DDL reached the history objects (pgaudit), or a history change was rejected. Check the PostgreSQL log, fbx_history_guard.verify() and fbx_history_guard.event; expected only during a reviewed break-glass migration."
   namespace           = "FinTechBankX/OpenProductsCatalog"
   metric_name         = "ProductHistoryTamperSignals"
   statistic           = "Sum"

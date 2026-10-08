@@ -173,6 +173,8 @@ AS $$
 BEGIN
     INSERT INTO fbx_history_guard.event (action, reason) VALUES ('disarm', reason);
     DELETE FROM fbx_history_guard.armed;
+    -- Logged by the server (log_min_messages warning); the history-tamper alarm matches it.
+    RAISE WARNING 'product_history guard: DISARMED by % (%)', session_user, reason;
     RETURN fbx_history_guard.verify();
 END
 $$;
