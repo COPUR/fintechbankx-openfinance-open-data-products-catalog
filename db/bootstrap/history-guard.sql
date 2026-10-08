@@ -9,9 +9,12 @@
 -- table and the trigger functions, so on its own it could disable or drop the
 -- triggers, replace a function, drop or rename the table. An event trigger
 -- owned by the admin refuses that: once armed, any DDL in the database that
---   - targets product_history, product_history_record() or
---     product_history_append_only(), or drops one of them or the three history
---     triggers (pg_event_trigger_ddl_commands / pg_event_trigger_dropped_objects), or
+--   - targets product_history, product_history_record(),
+--     product_history_append_only() or product_history_insert_guard() (V4), or
+--     drops one of them or a user trigger on product or product_history
+--     (pg_event_trigger_ddl_commands / pg_event_trigger_dropped_objects), or
+--   - adds a trigger on product or product_history (only the history trigger
+--     on product may write the history, V4), or
 --   - leaves the history's triggers, functions, columns or rules different
 --     from the state recorded at arming (tgenabled, md5(prosrc), SECURITY
 --     DEFINER, search_path, owner, ...),
@@ -74,16 +77,17 @@ DECLARE
     prod oid := to_regclass(format('%I.product', s));
     rec  oid := to_regprocedure(format('%I.product_history_record()', s));
     app  oid := to_regprocedure(format('%I.product_history_append_only()', s));
+    ins  oid := to_regprocedure(format('%I.product_history_insert_guard()', s));
     trgs oid[];
 BEGIN
-    IF hist IS NULL OR prod IS NULL OR rec IS NULL OR app IS NULL THEN
+    IF hist IS NULL OR prod IS NULL OR rec IS NULL OR app IS NULL OR ins IS NULL THEN
         RETURN;
     END IF;
     SELECT array_agg(t.oid ORDER BY t.oid) INTO trgs
       FROM pg_trigger t
      WHERE NOT t.tgisinternal
-       AND (t.tgrelid = hist OR (t.tgrelid = prod AND (t.tgfoid = rec OR t.tgname = 'trg_product_history')));
-    protected_oids := ARRAY[hist, rec, app] || coalesce(trgs, '{}');
+       AND t.tgrelid IN (hist, prod);
+    protected_oids := ARRAY[hist, rec, app, ins] || coalesce(trgs, '{}');
     fingerprint := md5(concat_ws(' | ',
         (SELECT concat_ws(':', c.relname, c.relnamespace, c.relowner, c.relkind, c.relpersistence,
                           c.relrowsecurity, c.relforcerowsecurity, c.relhasrules)
@@ -95,7 +99,7 @@ BEGIN
         (SELECT count(*) FROM pg_rewrite r WHERE r.ev_class = hist),
         (SELECT string_agg(concat_ws(':', p.proname, p.pronamespace, p.proowner, md5(p.prosrc), p.prosecdef,
                                      p.provolatile, coalesce(p.proconfig::text, '')), ',' ORDER BY p.proname)
-           FROM pg_proc p WHERE p.oid IN (rec, app))));
+           FROM pg_proc p WHERE p.oid IN (rec, app, ins))));
 END
 $$;
 

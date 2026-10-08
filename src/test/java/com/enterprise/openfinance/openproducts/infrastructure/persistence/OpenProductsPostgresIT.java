@@ -177,7 +177,7 @@ class OpenProductsPostgresIT {
                 + ".flyway_schema_history WHERE success AND version IS NOT NULL ORDER BY installed_rank", String.class);
 
         assertThat(applied).containsExactly("1:create product catalogue", "2:product history and roles",
-            "3:history operator identity");
+            "3:history operator identity", "4:history insert guard and deletes");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM " + SCHEMA
             + ".product WHERE product_id IN ('SAMPLE-PCA-001', 'SAMPLE-SAV-001', 'SAMPLE-SME-LOAN-01', 'SAMPLE-SME-PCA-01')", Integer.class))
             .isEqualTo(4);
