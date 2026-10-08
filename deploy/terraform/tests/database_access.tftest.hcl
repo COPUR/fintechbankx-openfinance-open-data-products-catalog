@@ -70,5 +70,5 @@ run "refuses_the_workload_group_as_operator_source" {
     operator_security_group_ids = ["sg-0123456789abcdef0"]
   }
 
-  expect_failures = [var.operator_security_group_ids]
+  expect_failures = [aws_vpc_security_group_ingress_rule.postgres_from_operator]
 }

@@ -73,6 +73,26 @@ resource "aws_vpc_security_group_ingress_rule" "postgres_from_workload" {
   description                  = "PostgreSQL from ${local.service_id} pods"
 }
 
+# Operator hosts or CI agents inside the VPC (no public path, no CIDR) run the
+# DBA bootstrap and the catalogue import; see runbook section 2.
+resource "aws_vpc_security_group_ingress_rule" "postgres_from_operator" {
+  for_each = toset(var.operator_security_group_ids)
+
+  security_group_id            = aws_security_group.database.id
+  referenced_security_group_id = each.value
+  ip_protocol                  = "tcp"
+  from_port                    = 5432
+  to_port                      = 5432
+  description                  = "PostgreSQL from operator host or CI agent ${each.value} (bootstrap, catalogue import)"
+
+  lifecycle {
+    precondition {
+      condition     = each.value != var.workload_security_group_id
+      error_message = "The workload security group must not double as an operator group: pods never get the import or admin credential."
+    }
+  }
+}
+
 # --- Aurora PostgreSQL (Serverless v2, Multi-AZ) ---------------------------
 
 resource "aws_rds_cluster_parameter_group" "database" {

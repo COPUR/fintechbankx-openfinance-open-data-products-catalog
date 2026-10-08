@@ -33,6 +33,22 @@ variable "workload_security_group_id" {
   description = "Security group of the EKS nodes or pods allowed to reach PostgreSQL."
 }
 
+variable "operator_security_group_ids" {
+  type        = list(string)
+  description = "Security groups of in-VPC operator hosts or CI agents that run the DBA bootstrap and the catalogue import (runbook section 2). Each gets PostgreSQL (5432) ingress by security-group reference; there is never a CIDR or public path. Empty: only the workload reaches the database."
+  default     = []
+
+  validation {
+    condition     = alltrue([for id in var.operator_security_group_ids : can(regex("^sg-[0-9a-f]{8}([0-9a-f]{9})?$", id))])
+    error_message = "operator_security_group_ids takes security group ids (sg-...) only, never CIDRs: operator access to PostgreSQL is admitted by security group, not by address."
+  }
+
+  validation {
+    condition     = length(distinct(var.operator_security_group_ids)) == length(var.operator_security_group_ids)
+    error_message = "operator_security_group_ids has duplicates."
+  }
+}
+
 variable "eks_oidc_provider_arn" {
   type        = string
   description = "IAM OIDC provider ARN of the EKS cluster (IRSA)."
