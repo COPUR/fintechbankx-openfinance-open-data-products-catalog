@@ -113,6 +113,9 @@ GRANT CONNECT, CREATE ON DATABASE $db TO $owner;
 GRANT CONNECT ON DATABASE $db TO $app;
 GRANT CONNECT, TEMPORARY ON DATABASE $db TO $importer;
 SQL
+# The admin installs the history guard (event triggers), disarmed until the
+# first deploy has created the history.
+psql_q -d "$db" -v schema="$schema" -f "$root/db/bootstrap/history-guard.sql"
 
 # What Flyway does at deploy time (create-schemas, default-schema), as the owner.
 as_owner psql_q -d "$db" -c "CREATE SCHEMA $schema"
@@ -120,6 +123,10 @@ for migration in "$root"/src/main/resources/db/migration/V*.sql; do
   echo "--- migration $(basename "$migration") as $owner"
   PGOPTIONS="-c search_path=$schema" as_owner psql_q -d "$db" -f "$migration"
 done
+
+echo "--- admin arms the history guard after the first deploy"
+psql_q -d "$db" -c "SELECT fbx_history_guard.arm('rehearsal: first deploy')" > /dev/null
+check "history guard is armed and intact" "SELECT fbx_history_guard.verify()" "armed, intact"
 
 for run in 1 2; do
   echo "--- seed run $run"
@@ -325,6 +332,20 @@ refused "a new trigger on the history" \
 check "history triggers enabled and function bodies unchanged after the probes" "$integrity_sql" "$intact"
 as_owner psql_q -d "$db" -c "SET search_path = $schema" -c "ALTER TABLE product ADD COLUMN guard_probe int" -c "ALTER TABLE product DROP COLUMN guard_probe"
 echo "ok   other DDL by the schema owner (future migrations) still runs"
+check "history guard still armed and intact after the probes" "SELECT fbx_history_guard.verify()" "armed, intact"
+denied "the schema owner cannot disarm the guard" as_owner "SELECT fbx_history_guard.disarm('owner')"
+denied "the schema owner cannot disable the guard's event trigger" as_owner "ALTER EVENT TRIGGER fbx_history_guard_ddl DISABLE"
+denied "the schema owner cannot rewrite the guard's armed state" as_owner "DELETE FROM fbx_history_guard.armed"
+
+echo "--- break-glass: the admin disarms, the owner changes the history, the admin re-arms"
+psql_q -d "$db" -c "SELECT fbx_history_guard.disarm('rehearsal: break-glass')" > /dev/null
+check "disarmed guard reports it" "SELECT fbx_history_guard.verify()" "DISARMED"
+as_owner psql_q -d "$db" -c "SET search_path = $schema" -c "COMMENT ON TABLE product_history IS 'Append-only change history of product (break-glass rehearsal)'"
+psql_q -d "$db" -c "SELECT fbx_history_guard.arm('rehearsal: re-arm after break-glass')" > /dev/null
+check "re-armed guard is intact" "SELECT fbx_history_guard.verify()" "armed, intact"
+check "both break-glass steps are recorded" \
+  "SELECT string_agg(action, ',' ORDER BY event_id) FROM fbx_history_guard.event" "arm,disarm,arm"
+refused "re-armed guard refuses history DDL again" "COMMENT ON TABLE product_history IS 'x'"
 
 psql_q -d postgres -c "DROP DATABASE $db"
 echo "Migration, seed and import rehearsal passed."
