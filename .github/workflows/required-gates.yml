@@ -114,6 +114,30 @@ jobs:
             echo "No package.json test in this repository; skipping Node test."
           fi
 
+      - name: TDD guard (ADR-029) - production changes need test changes
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          NO_BEHAVIOUR_CHANGE: ${{ contains(github.event.pull_request.labels.*.name, 'no-behaviour-change') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF"
+          changed="$(git diff --name-only "origin/${BASE_REF}...HEAD")"
+          main_changes="$(printf '%s\n' "$changed" | grep -E '(^|/)src/main/' || true)"
+          test_changes="$(printf '%s\n' "$changed" | grep -E '(^|/)src/test/' || true)"
+          if [ -n "$main_changes" ] && [ -z "$test_changes" ]; then
+            if [ "$NO_BEHAVIOUR_CHANGE" = "true" ]; then
+              echo "src/main changed without src/test changes; allowed by label no-behaviour-change."
+            else
+              echo "This PR changes src/main but no file under src/test (ADR-029):"
+              printf '%s\n' "$main_changes"
+              echo "Add or update tests, or label the PR no-behaviour-change if it truly changes no behaviour."
+              exit 1
+            fi
+          fi
+          echo "TDD guard passed."
+
       - name: OpenAPI contract lint
         if: ${{ hashFiles('openapi/*.yaml') != '' || hashFiles('api/openapi/*.yaml') != '' || hashFiles('src/main/resources/openapi/*.yaml') != '' }}
         env:

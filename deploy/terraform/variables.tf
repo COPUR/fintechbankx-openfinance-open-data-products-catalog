@@ -88,6 +88,11 @@ variable "backup_retention_days" {
   type        = number
   description = "Automated backup retention (point-in-time recovery window)."
   default     = 35
+
+  validation {
+    condition     = var.backup_retention_days >= 7 && var.backup_retention_days <= 35
+    error_message = "The catalogue is a system of record: keep 7 to 35 days of Aurora backups."
+  }
 }
 
 variable "deletion_protection" {
