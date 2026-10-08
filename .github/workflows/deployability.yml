@@ -106,6 +106,8 @@ jobs:
       - run: terraform fmt -check -recursive
       - run: terraform init -backend=false -input=false
       - run: terraform validate
+      - name: Plan-only tests with mocked providers (database access rules)
+        run: terraform test
 
   data-migration:
     name: deploy/data-migration-rehearsal
