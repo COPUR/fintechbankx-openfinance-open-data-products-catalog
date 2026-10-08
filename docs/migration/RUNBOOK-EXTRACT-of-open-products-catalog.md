@@ -10,7 +10,7 @@ Extraction of the product catalogue from `enterprise-loan-management-system`
 | Slice | Public product catalogue read model: `GET /open-finance/v1/products` |
 | Owned data | `db_of_open_products_catalog_<env>`, schema `sc_of_open_products_catalog`: `product`, `product_history` |
 | Events | none yet (ADR-0001); future namespace `evt.of.products.*` |
-| Depends on | its database; the gateway rate limit for `GET /open-finance/v1/products` (mesh PR #11, commit `5e756f0`: 100-token bucket refilled at 50/s per gateway pod, `429` with `Retry-After` and `x-fbx-rate-limited: true`), owned by `fintechbankx-platform-mesh-security-service-mesh` |
+| Depends on | its database; ClusterSecretStore `aws-secrets-manager`; the gateway route and rate limit for `GET /open-finance/v1/products` (mesh PR #11, commit `5e756f0`: 100-token bucket refilled at 50/s per gateway pod, `429` with `Retry-After` and `x-fbx-rate-limited: true`), owned by `fintechbankx-platform-mesh-security-service-mesh` |
 
 ## 1. Data ownership split
 
@@ -74,16 +74,64 @@ migration). No role can update or delete history rows.
 
 Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migration-rehearsal`).
 
-## 3. Cutover plan
+## 3. Go-live (one way)
 
-| Step | Action | Rollback |
+There is no data to move and no dual run: the monolith only serves sample
+rows from memory, so the service goes live in one step once the signed-off
+catalogue is verified on staging. Rolling back means rolling back this
+service, not returning traffic to the monolith.
+
+**Depends on**
+
+- Gateway route and rate limit for `GET /open-finance/v1/products`: mesh PR #11
+  (`fintechbankx-platform-mesh-security-service-mesh`, commit `5e756f0`),
+  merged and applied in the target environment.
+- `ClusterSecretStore` `aws-secrets-manager` (platform External Secrets),
+  able to read `<env>/open-products-catalog-service/db-app` and `db-migrate`
+  and decrypt with the service's tagged KMS key.
+- The DBA bootstrap in section 2 (three roles) done before the first deploy.
+
+**Steps**
+
+| Step | Action | Done when |
 |---|---|---|
-| 1 | Deploy the service, import the catalogue, compare `GET /open-finance/v1/products` with the monolith response for each type/segment | uninstall the release; drop the schema |
-| 2 | Gateway: route `GET /open-finance/v1/products` to `open-products-catalog-service.open-finance.svc.cluster.local:8080` with a weighted route (10 % then 100 %) | set the weight back to the monolith |
-| 3 | Monolith: remove the `productcatalog` controller after one release cycle at 100 % | redeploy the previous monolith release |
+| 1 | Staging: deploy the release, run the import with the product owner's signed-off CSV (section 2, step 4), import it a second time | second run prints `inserted: 0, updated: 0`; row count per status equals the CSV's (section 4) |
+| 2 | Staging: verify (section 4) and compare with the monolith on **response shape and headers only**, not rows: same JSON structure (`Data.Product[]`, `Links.Self`, `Meta.TotalRecords`), `X-FAPI-Interaction-ID` echoed, `ETag` present, `If-None-Match` gives `304`, missing interaction id or invalid filter gives `400` | all checks pass; differences match the list below |
+| 3 | Production: deploy the same image, run the same CSV import, verify as in step 2 | as step 2 |
+| 4 | Switch the gateway route (mesh PR #11) to `open-products-catalog-service.open-finance.svc.cluster.local:8080` in one step | 100 % of the route on the service |
+| 5 | Watch for 60 minutes against the rollback triggers below | no trigger fired |
+| 6 | Monolith: remove the `productcatalog` controller in its next release | merged in enterprise-loan-management-system |
 
-Response shape, headers and ETag semantics are unchanged; the new
-`Cache-Control` header is additive.
+**Known differences from the monolith** (the response is not identical):
+
+- Data: the imported catalogue, not the monolith's in-memory sample rows.
+- `ETag`: hex SHA-256 over every published field; the monolith hashes the
+  count, ids and `updatedAt` and encodes base64url. Clients' stored ETags do
+  not match after the switch, so their first request is a `200`.
+- `Cache-Control: no-cache` instead of `public, max-age=60`.
+- Invalid `type`/`segment`: both return `400` for values outside
+  `^[A-Za-z0-9_-]{2,30}$`; the error message text differs.
+- `Authorization`: the monolith rejects a header that is not `Bearer`/`DPoP`
+  with `400`; the service ignores it (public data, `security: []`).
+- `429` with `Retry-After` and `x-fbx-rate-limited: true` comes from the gateway.
+
+**Rollback triggers** (any one, measured at the gateway for this route over 5 minutes, or as stated):
+
+| Trigger | Threshold |
+|---|---|
+| 5xx rate | above 1 % of requests |
+| p95 latency | above 300 ms |
+| Readiness | fewer than 2 ready pods for 2 minutes (`/actuator/health/readiness`) |
+| Row count | `ACTIVE` rows in `product` differ from the signed-off CSV's `ACTIVE` rows |
+
+**Rollback**
+
+- Release problem (5xx, latency, readiness): `helm rollback open-products-catalog-service <previous revision> -n open-finance`.
+  Migrations are additive, so the previous release runs on the current schema.
+- Catalogue problem (row count, wrong values): re-import the previous signed-off
+  CSV (section 2, step 4); every change is in `product_history`.
+- Returning the route to the monolith is not a rollback: it serves sample data
+  only. Use it only if the service cannot serve at all, and treat it as an incident.
 
 ## 4. Verification
 
