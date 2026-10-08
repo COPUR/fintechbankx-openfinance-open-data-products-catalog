@@ -73,9 +73,9 @@ run "refuses_the_workload_group_as_operator_source" {
   expect_failures = [aws_vpc_security_group_ingress_rule.postgres_from_operator]
 }
 
-# The schema owner can disable the history triggers; its DDL must leave a
-# trace that someone is told about (ADR-0001: tamper-evident against the
-# runtime and import roles, detected for the owner).
+# The history guard (db/bootstrap/history-guard.sql) refuses the schema
+# owner's DDL on the history; refusals, a disarmed guard and any DDL that does
+# reach the history objects (pgaudit) must page someone (ADR-0001).
 run "owner_ddl_is_logged_and_alarmed" {
   command = plan
 
@@ -101,11 +101,26 @@ run "owner_ddl_is_logged_and_alarmed" {
   }
 
   assert {
+    condition = anytrue([
+      for p in aws_rds_cluster_parameter_group.database.parameter :
+      p.name == "shared_preload_libraries" && contains(split(",", p.value), "pgaudit") && p.apply_method == "pending-reboot"
+    ])
+    error_message = "pgaudit must be preloaded (applied at the next reboot)."
+  }
+
+  assert {
+    condition = anytrue([
+      for p in aws_rds_cluster_parameter_group.database.parameter : p.name == "pgaudit.log" && p.value == "ddl,role"
+    ])
+    error_message = "pgaudit must log DDL (including DDL nested in DO/EXECUTE) and role changes."
+  }
+
+  assert {
     condition = alltrue([
-      for term in ["DISABLE TRIGGER", "disable trigger", "DROP TRIGGER", "drop trigger", "product_history_record", "append-only"] :
+      for term in ["product_history guard", "sc_of_open_products_catalog.product_history", "append-only"] :
       strcontains(aws_cloudwatch_log_metric_filter.history_tamper.pattern, term)
     ])
-    error_message = "The metric filter must catch disabled or dropped triggers, a replaced history function and rejected history changes."
+    error_message = "The metric filter must catch guard refusals and disarming, pgaudit DDL lines on the history objects and rejected history changes."
   }
 
   assert {

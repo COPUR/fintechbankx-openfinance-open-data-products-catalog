@@ -338,7 +338,10 @@ denied "the schema owner cannot disable the guard's event trigger" as_owner "ALT
 denied "the schema owner cannot rewrite the guard's armed state" as_owner "DELETE FROM fbx_history_guard.armed"
 
 echo "--- break-glass: the admin disarms, the owner changes the history, the admin re-arms"
-psql_q -d "$db" -c "SELECT fbx_history_guard.disarm('rehearsal: break-glass')" > /dev/null
+psql_q -d "$db" -c "SELECT fbx_history_guard.disarm('rehearsal: break-glass')" > /dev/null 2> "$work/disarm.err"
+# The warning reaches the PostgreSQL log, where the history-tamper alarm matches it.
+grep -q "WARNING:  product_history guard: DISARMED" "$work/disarm.err" || { echo "FAIL disarming logged no warning" >&2; cat "$work/disarm.err" >&2; exit 1; }
+echo "ok   disarming the guard logs a warning for the alarm"
 check "disarmed guard reports it" "SELECT fbx_history_guard.verify()" "DISARMED"
 as_owner psql_q -d "$db" -c "SET search_path = $schema" -c "COMMENT ON TABLE product_history IS 'Append-only change history of product (break-glass rehearsal)'"
 psql_q -d "$db" -c "SELECT fbx_history_guard.arm('rehearsal: re-arm after break-glass')" > /dev/null
