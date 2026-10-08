@@ -79,20 +79,39 @@ So there is **no monolith catalogue data to backfill**.
   UPDATE` trigger writes the old and new row, the role, `application_name`
   (the import sets it to `import-products/<operator>`), the time and, since
   V3, `operator_arn`, the importing operator's AWS caller identity.
-- The history is **tamper-evident against the runtime and import roles
-  only**: neither has any privilege on `product_history`, and its triggers
-  reject `UPDATE`, `DELETE` and `TRUNCATE`. The **schema owner** is not
-  stopped: it owns the table and can disable or drop those triggers, or
-  replace the history function. That is **detected, not prevented**: Aurora
-  logs every DDL statement (`log_statement=ddl` in the cluster parameter
-  group, `deploy/terraform/main.tf`), the PostgreSQL log is exported to
-  CloudWatch, and the `history-tamper` metric filter and alarm fire on a
-  disabled or dropped trigger, a replaced `product_history_record` or a
-  rejected history change. The filter is case-sensitive (upper- and
-  lower-case DDL only); `pgaudit` with object auditing on `product_history`
-  would close that gap and is the next step if the owner credential's
-  exposure grows. The owner credential lives only in the `migrate` init
-  container.
+- What protects `product_history`, stated as what the rehearsal
+  (`scripts/migration/verify-migration.sh`, PostgreSQL 16, CI job
+  `deploy/data-migration-rehearsal`) tests:
+  - The runtime and import roles have no privilege on `product_history`;
+    `UPDATE`, `DELETE` and `TRUNCATE` of it are rejected by triggers, also
+    for the schema owner.
+  - The schema owner's DDL on the history is **prevented** while the history
+    guard (`db/bootstrap/history-guard.sql`, admin-owned event triggers
+    installed by the DBA bootstrap, not by Flyway) is armed. Sixteen probes
+    run as the owner are refused, including the review's three (replacing
+    `product_history_append_only` to `RETURN OLD`, `DISABLE TRIGGER` built by
+    concatenation inside `DO`/`EXECUTE`, spacing and case variants), and
+    disabling triggers (`USER`, `ALL`, replica-only), dropping triggers,
+    functions, the table or a column, renaming it, `SECURITY INVOKER`,
+    replacing the recording function, a rule or a new trigger on the
+    history. Afterwards the three triggers are enabled with unchanged
+    function bodies (`tgenabled`, `md5(prosrc)`) and
+    `fbx_history_guard.verify()` returns `armed, intact`. Other owner DDL
+    still runs.
+  - The owner cannot disarm the guard, disable its event trigger or edit its
+    state. Disarming is the admin's break-glass; arm and disarm are recorded
+    in `fbx_history_guard.event` and disarming logs a WARNING.
+- Configured but not exercised by a test (plan-only Terraform tests check
+  the configuration): pgaudit (`pgaudit.log=ddl,role`) and the
+  `history-tamper` metric filter and alarm on guard messages, pgaudit lines
+  naming the history objects and rejected history changes.
+- Not covered: the admin (rds_superuser) can disarm the guard or drop its
+  event triggers; that is the break-glass path, alarmed but not prevented.
+  The schema owner can still `INSERT` rows into `product_history` directly
+  and `DELETE` products (neither is DDL; a delete writes no history row).
+  The owner credential lives only in the `migrate` init container. Creating
+  the event triggers as `rds_superuser` on Aurora is documented AWS
+  behaviour but has not been run here.
 - Import attribution: `import-products.sh` takes the operator's identity from
   `aws sts get-caller-identity` (the same credentials that fetched the
   `db-import` secret) and the database rejects import-role changes without
@@ -125,6 +144,18 @@ ARN-shaped value. What bounds this:
 - the database is reachable only from the workload and the operator hosts in
   `operator_security_group_ids` (no public path);
 - the password is rotated after each production import window (runbook).
+
+### Risk acceptance (Proposed, awaiting sign-off)
+
+| Field | Value |
+|---|---|
+| Risk | Catalogue changes made with the shared import password can carry a self-declared `operator_arn`; the database cannot prove which operator connected. |
+| Likelihood / impact | Low / medium: needs an operator with access to the secret acting outside the script; the change itself is still recorded, attributed to the import role and bounded to `SELECT`, `INSERT`, `UPDATE` on `product`. |
+| Controls in place | STS caller identity required by the script and by the history trigger (V3); CloudTrail `GetSecretValue` per principal; no public network path; import role cannot delete or touch the history. |
+| Interim rule | The `db-import` password is rotated after every production import window (runbook section 2.1). The platform has accepted rotation as the interim rule. |
+| Target | Per-operator database logins with IAM database authentication: per-operator `rds-db:connect` granted through the platform's operator role and operator-access module (platform has confirmed it provides both); the shared password is then retired. |
+| Accepted by | Security: _pending_. Product owner (Open Data Squad): _pending_. |
+| Review | At the latest when the operator-access module is released, or six months after acceptance. |
 
 Not chosen for now: per-operator database logins with IAM database
 authentication (the cluster already has `iam_database_authentication_enabled`).
