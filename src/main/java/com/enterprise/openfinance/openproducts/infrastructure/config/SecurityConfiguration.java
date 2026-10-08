@@ -1,5 +1,6 @@
 package com.enterprise.openfinance.openproducts.infrastructure.config;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -16,9 +17,11 @@ import org.springframework.security.web.util.matcher.RequestMatcher;
  * server, JwtDecoder or identity-provider setting: an Authorization header is
  * never read. Add the resource server together with the first authenticated
  * endpoint. Actuator endpoints are served on the management port, which is
- * not exposed outside the pod network.
+ * not exposed outside the pod network. Not loaded when there is no web server
+ * (the migrate-only run).
  */
 @Configuration
+@ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class SecurityConfiguration {
 
     static final RequestMatcher PUBLIC_CATALOGUE =

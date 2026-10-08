@@ -8,7 +8,7 @@ Extraction of the product catalogue from `enterprise-loan-management-system`
 |---|---|
 | Context / service | `of` / `svc-of-open-products-catalog` (slug `open-products-catalog-service`) |
 | Slice | Public product catalogue read model: `GET /open-finance/v1/products` |
-| Owned data | `db_of_open_products_catalog_<env>`, schema `sc_of_open_products_catalog`: `product` |
+| Owned data | `db_of_open_products_catalog_<env>`, schema `sc_of_open_products_catalog`: `product`, `product_history` |
 | Events | none yet (ADR-0001); future namespace `evt.of.products.*` |
 | Depends on | its database; the gateway rate limit for `GET /open-finance/v1/products` (`429` + `Retry-After`), owned by `fintechbankx-platform-mesh-security-service-mesh` |
 
@@ -20,20 +20,56 @@ Extraction of the product catalogue from `enterprise-loan-management-system`
 | `productcatalog` in-memory TTL cache | dropped | replaced by HTTP caching (ETag, Cache-Control) |
 | Product SQL tables | none exist | no monolith migration creates one, so there is nothing to backfill |
 | `sc_of_open_products_catalog.product` | this service | Flyway `V1__create_product_catalogue.sql` |
+| `sc_of_open_products_catalog.product_history` | this service | Flyway `V2__product_history_and_roles.sql` (append-only audit trail) |
 
 The service never reads monolith tables; nothing else reads `sc_of_open_products_catalog`.
 
 ## 2. Loading the catalogue
 
-1. Terraform creates the cluster and the empty `<env>/open-products-catalog-service/db-app` secret.
-2. DBA bootstrap with the RDS-managed admin credential:
-   `CREATE ROLE open_products_catalog_app LOGIN PASSWORD '<generated>'; GRANT CREATE ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_app;`
-   then write `{"username","password"}` to the secret (never to a file or ticket).
-3. Deploy the chart; Flyway creates the schema and table at startup.
-4. Import the catalogue the product owner signed off:
-   `PGPASSWORD=... db/import/import-products.sh "host=<writer> dbname=db_of_open_products_catalog_<env> user=open_products_catalog_app sslmode=require" products.csv`
+The database has three login roles, each with its own Secrets Manager secret
+(KMS key `alias/<env>-open-products-catalog-service-db`):
+
+| Role | Secret | Used by | May |
+|---|---|---|---|
+| `open_products_catalog_owner` | `<env>/open-products-catalog-service/db-migrate` | Flyway, in the pod's `migrate` init container only | own the schema, run migrations |
+| `open_products_catalog_app` | `<env>/open-products-catalog-service/db-app` | the serving container | `SELECT` on `product` (nothing on `product_history`) |
+| `open_products_catalog_import` | `<env>/open-products-catalog-service/db-import` | operators running `import-products.sh` | `SELECT`, `INSERT`, `UPDATE` on `product`; no `DELETE` or `TRUNCATE` |
+
+Every insert or update of `product` writes an append-only row to
+`product_history` (old and new values, role, `application_name`, time; V2
+migration). No role can update or delete history rows.
+
+1. Terraform creates the cluster and the three empty secrets (outputs
+   `app_db_secret_name`, `migrate_db_secret_name`, `import_db_secret_name`).
+2. DBA bootstrap, once per environment, connected with the RDS-managed admin
+   credential (output `master_user_secret_arn`) to `db_of_open_products_catalog_<env>`.
+   Generate each password into the secret directly (never into a file or ticket):
+
+   ```sql
+   CREATE ROLE open_products_catalog_owner  LOGIN PASSWORD '<generated>';
+   CREATE ROLE open_products_catalog_app    LOGIN PASSWORD '<generated>';
+   CREATE ROLE open_products_catalog_import LOGIN PASSWORD '<generated>';
+   REVOKE ALL ON DATABASE db_of_open_products_catalog_<env> FROM PUBLIC;
+   GRANT CONNECT, CREATE    ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_owner;
+   GRANT CONNECT            ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_app;
+   GRANT CONNECT, TEMPORARY ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_import;
+   ```
+
+   The roles must exist before the first deploy: migration V2 grants the
+   runtime and import privileges only to roles that exist when it runs (it
+   logs a NOTICE otherwise). If a role was created late, re-run the two grants
+   from `V2__product_history_and_roles.sql` as the owner.
+3. Deploy the chart with `externalSecret.remoteSecretName` (db-app) and
+   `externalSecret.migrateRemoteSecretName` (db-migrate). The `migrate` init
+   container runs Flyway as the owner and exits; the service then starts with
+   the runtime role and Flyway disabled. Check:
+   `SELECT grantee, privilege_type FROM information_schema.role_table_grants WHERE table_schema = 'sc_of_open_products_catalog' ORDER BY 1, 2;`
+4. Import the catalogue the product owner signed off, as the import role and
+   with your operator id (it becomes `product_history.application_name`):
+   `IMPORT_OPERATOR=<your id> PGPASSWORD=... db/import/import-products.sh "host=<writer> dbname=db_of_open_products_catalog_<env> user=open_products_catalog_import sslmode=require" products.csv`
    It prints `inserted / updated / unchanged`; a second run of the same file
-   must print `inserted: 0, updated: 0`. A bad row aborts the whole file.
+   must print `inserted: 0, updated: 0`. A bad row aborts the whole file. The
+   script refuses any other role.
 5. `OPEN_PRODUCTS_SEED_ENABLED` stays `false` outside dev and CI.
 
 Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migration-rehearsal`).

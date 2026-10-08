@@ -136,13 +136,32 @@ resource "aws_rds_cluster_instance" "database" {
   promotion_tier                        = count.index
 }
 
-# Application credential (role open_products_catalog_app, owner of schema
-# sc_of_open_products_catalog). The DBA bootstrap in docs/migration creates the
-# role and writes {"username", "password"} here; Terraform never sees the value.
-# Path follows the platform contract: <env>/<service-slug>/db-app.
+# Database credentials, one per role (runbook section 2). The DBA bootstrap in
+# docs/migration creates the roles and writes {"username", "password"} into
+# each secret; Terraform never sees the values. Paths follow the platform
+# contract <env>/<service-slug>/<name>; all three use the tagged KMS key that
+# External Secrets may decrypt.
+#   db-app      open_products_catalog_app     runtime: SELECT on product
+#   db-migrate  open_products_catalog_owner   schema owner: Flyway (migrate init container)
+#   db-import   open_products_catalog_import  import-products.sh: SELECT, INSERT, UPDATE on product
 resource "aws_secretsmanager_secret" "app_database" {
   name                    = "${var.environment}/${local.service_slug}/db-app"
-  description             = "Application database credential for ${local.service_id}"
+  description             = "Runtime (read-only) database credential for ${local.service_id}"
+  kms_key_id              = aws_kms_key.database.arn
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret" "migrate_database" {
+  name                    = "${var.environment}/${local.service_slug}/db-migrate"
+  description             = "Schema owner credential for ${local.service_id} Flyway migrations"
+  kms_key_id              = aws_kms_key.database.arn
+  recovery_window_in_days = 7
+}
+
+# Not synced into Kubernetes: operators fetch it to run the catalogue import.
+resource "aws_secretsmanager_secret" "import_database" {
+  name                    = "${var.environment}/${local.service_slug}/db-import"
+  description             = "Catalogue import credential for ${local.service_id} (no DELETE)"
   kms_key_id              = aws_kms_key.database.arn
   recovery_window_in_days = 7
 }

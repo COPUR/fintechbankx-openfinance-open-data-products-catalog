@@ -57,8 +57,16 @@ So there is **no monolith catalogue data to backfill**.
 
 - Every replica serves the same catalogue; a catalogue change is visible within
   one snapshot interval (10 s by default) without redeploying.
-- Products are withdrawn by status (`WITHDRAWN`) or `effective_to`, never deleted,
-  which keeps an audit trail and lets the import stay idempotent.
+- Products are withdrawn by status (`WITHDRAWN`) or `effective_to`, never
+  deleted (the import role has no `DELETE`), which lets the import stay
+  idempotent. The audit trail is `product_history` (V2): an `AFTER INSERT OR
+  UPDATE` trigger writes the old and new row, the role, `application_name`
+  (the import sets it to `import-products/<operator>`) and the time; the table
+  is append-only (triggers reject `UPDATE`, `DELETE` and `TRUNCATE`, and no
+  role has privileges on it).
+- Three database roles: the schema owner runs Flyway only (in the pod's
+  migrate init container), the runtime role can only `SELECT` from `product`,
+  and the import role can `SELECT`, `INSERT` and `UPDATE` it.
 - The service's database load is at most one indexed query per pod per
   snapshot interval; Aurora Serverless v2 can run at a low minimum capacity.
 - Request-rate limiting (`429` with `Retry-After`) is the API gateway's job and

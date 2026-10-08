@@ -34,8 +34,14 @@ spring:
     default-schema: sc_of_open_products_catalog
     create-schemas: true
     locations: classpath:db/migration
+    # Flyway runs as the schema owner (secret <env>/open-products-catalog-service/db-migrate),
+    # never as the runtime role; locally and in CI it falls back to the datasource login.
+    user: ${FLYWAY_USER:${spring.datasource.username}}
+    password: ${FLYWAY_PASSWORD:${spring.datasource.password:}}
 
 openproducts:
+  # true: migrate the schema and exit (Helm init container); see MigrateOnlyConfiguration.
+  migrate-only: ${OPEN_PRODUCTS_MIGRATE_ONLY:false}
   catalog:
     # postgres (default) is the only runtime store; tests may switch to in-memory.
     store: postgres

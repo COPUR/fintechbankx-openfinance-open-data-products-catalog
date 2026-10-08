@@ -8,10 +8,15 @@
 # Products missing from the CSV are left as they are; withdraw a product by
 # importing it with status WITHDRAWN (or an effective_to), never by deleting.
 # The whole file is applied in one transaction: any bad row aborts the import.
+# Every inserted or updated row is recorded in product_history (V2 trigger)
+# with the role and application_name "import-products/<operator>".
 #
-#   db/import/import-products.sh <conninfo> <products.csv>
+#   IMPORT_OPERATOR=<your id> db/import/import-products.sh <conninfo> <products.csv>
 #
-# Example conninfo: "host=<aurora-writer> dbname=db_of_open_products_catalog_prod user=open_products_catalog_app sslmode=require".
+# Runs only as the import role (open_products_catalog_import, credential in
+# <env>/open-products-catalog-service/db-import), which may SELECT, INSERT and
+# UPDATE product but not DELETE. Example conninfo:
+# "host=<aurora-writer> dbname=db_of_open_products_catalog_prod user=open_products_catalog_import sslmode=verify-full sslrootcert=<rds-ca-bundle.pem>".
 # Passwords come from PGPASSWORD or ~/.pgpass, never from arguments.
 # CSV header (see products.example.csv):
 #   product_id,product_type,segment,name,description,currency,monthly_fee_amount,
@@ -26,6 +31,8 @@ fi
 target_db="$1"
 csv="$2"
 schema="${OPEN_PRODUCTS_SCHEMA:-sc_of_open_products_catalog}"
+import_role="${OPEN_PRODUCTS_IMPORT_ROLE:-open_products_catalog_import}"
+operator="${IMPORT_OPERATOR:-}"
 
 if [ ! -r "$csv" ]; then
   echo "cannot read $csv" >&2
@@ -33,6 +40,15 @@ if [ ! -r "$csv" ]; then
 fi
 if ! [[ "$schema" =~ ^[a-z_][a-z0-9_]*$ ]]; then
   echo "invalid schema name '$schema'" >&2
+  exit 2
+fi
+if ! [[ "$import_role" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+  echo "invalid import role name '$import_role'" >&2
+  exit 2
+fi
+# The operator's id goes into product_history.application_name (max 63 bytes).
+if ! [[ "$operator" =~ ^[A-Za-z0-9._@-]{1,40}$ ]]; then
+  echo "set IMPORT_OPERATOR to your operator id (1-40 of A-Z a-z 0-9 . _ @ -)" >&2
   exit 2
 fi
 expected_header="product_id,product_type,segment,name,description,currency,monthly_fee_amount,annual_rate_percent,eligibility,status,effective_from,effective_to"
@@ -43,10 +59,20 @@ fi
 
 # psql reads the CSV client-side (\copy), so the file never has to be on the DB host.
 csv_literal="${csv//\'/\'\'}"
-psql -X -q -v ON_ERROR_STOP=1 "$target_db" <<SQL
+psql -X -q -v ON_ERROR_STOP=1 -v app_name="import-products/$operator" "$target_db" <<SQL
 \set QUIET on
 BEGIN;
 SET LOCAL search_path = $schema;
+SET LOCAL application_name = :'app_name';
+
+-- Only the import role may load the catalogue (never the owner or an admin).
+DO \$\$
+BEGIN
+    IF current_user <> '$import_role' THEN
+        RAISE EXCEPTION 'refusing to import as %: connect as $import_role', current_user;
+    END IF;
+END
+\$\$;
 
 CREATE TEMP TABLE product_import (
     product_id          text,

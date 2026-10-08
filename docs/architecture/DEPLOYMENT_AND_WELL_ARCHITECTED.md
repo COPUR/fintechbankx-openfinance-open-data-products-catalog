@@ -41,10 +41,13 @@ ingress gateway. Everything here is **Proposed** until the owning squad deploys 
   RuntimeDefault seccomp; Istio sidecar for mTLS; NetworkPolicy allows ingress
   from the gateway and Prometheus only, and egress to DNS, PostgreSQL, OTLP
   and istiod.
-- Credentials: `<env>/open-products-catalog-service/db-app` in Secrets Manager
-  (KMS-encrypted), synced by External Secrets (`aws-secrets-manager`). The IRSA
-  role can read only that secret, its KMS key and its SSM parameters. Aurora
-  enforces TLS (`rds.force_ssl`).
+- Credentials: one role per duty, each in Secrets Manager under
+  `<env>/open-products-catalog-service/` (KMS-encrypted): `db-app` (runtime,
+  `SELECT` on `product`), `db-migrate` (schema owner, used only by the
+  `migrate` init container) and `db-import` (operators; no `DELETE`). External
+  Secrets (`aws-secrets-manager`) syncs `db-app` and `db-migrate`; the pod's
+  IRSA role reads only its SSM parameters. Every catalogue change lands in the
+  append-only `product_history`. Aurora enforces TLS (`rds.force_ssl`).
 
 ## Performance efficiency
 

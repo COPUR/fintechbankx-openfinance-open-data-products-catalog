@@ -23,3 +23,7 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- define "products.dbSecretName" -}}
 {{ include "products.name" . }}-db
 {{- end -}}
+
+{{- define "products.migrateSecretName" -}}
+{{ include "products.name" . }}-db-migrate
+{{- end -}}

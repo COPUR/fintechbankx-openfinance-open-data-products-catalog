@@ -18,6 +18,16 @@ output "app_db_secret_name" {
   value       = aws_secretsmanager_secret.app_database.name
 }
 
+output "migrate_db_secret_name" {
+  description = "Helm value externalSecret.migrateRemoteSecretName."
+  value       = aws_secretsmanager_secret.migrate_database.name
+}
+
+output "import_db_secret_name" {
+  description = "Credential for db/import/import-products.sh (operators only)."
+  value       = aws_secretsmanager_secret.import_database.name
+}
+
 output "master_user_secret_arn" {
   description = "RDS-managed admin credential, for the DBA bootstrap only."
   value       = aws_rds_cluster.database.master_user_secret[0].secret_arn

@@ -27,6 +27,15 @@ spec:
         sidecar.istio.io/inject: {{ .Values.mesh.sidecarInject | quote }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # Restarts pods when the secret mapping changes, and on the next
+        # upgrade after a credential rotation (lookup reads the synced Secrets'
+        # data; it is empty under helm template/lint).
+        checksum/secret: {{ printf "%s%v%v" (include (print $.Template.BasePath "/externalsecret.yaml") .) (lookup "v1" "Secret" (include "products.namespace" .) (include "products.dbSecretName" .)).data (lookup "v1" "Secret" (include "products.namespace" .) (include "products.migrateSecretName" .)).data | sha256sum }}
+        {{- if .Values.mesh.sidecarInject }}
+        # Aurora is outside the mesh (PostgreSQL TLS end to end); without this the
+        # migrate init container, which runs before the sidecar, cannot connect.
+        traffic.sidecar.istio.io/excludeOutboundPorts: {{ .Values.networkPolicy.databasePort | quote }}
+        {{- end }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.service.managementPort | quote }}
         prometheus.io/path: /actuator/prometheus
@@ -53,6 +62,45 @@ spec:
           labelSelector:
             matchLabels:
               {{- include "products.selectorLabels" . | nindent 14 }}
+      {{- if .Values.externalSecret.enabled }}
+      initContainers:
+        # Flyway as the schema owner, then exit (OPEN_PRODUCTS_MIGRATE_ONLY).
+        # Replicas starting together are serialised by Flyway's lock.
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "products.name" . }}
+            - secretRef:
+                name: {{ include "products.migrateSecretName" . }}
+          env:
+            - name: OPEN_PRODUCTS_MIGRATE_ONLY
+              value: "true"
+            - name: SPRING_MAIN_WEB_APPLICATION_TYPE
+              value: none
+            # Hibernate validates the migrated schema with the same owner login.
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "products.migrateSecretName" . }}
+                  key: FLYWAY_USER
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "products.migrateSecretName" . }}
+                  key: FLYWAY_PASSWORD
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      {{- end }}
       containers:
         - name: open-products-catalog-service
           image: "{{ required "image.repository is required" .Values.image.repository }}:{{ required "image.tag is required" .Values.image.tag }}"
@@ -69,6 +117,13 @@ spec:
             - secretRef:
                 name: {{ include "products.dbSecretName" . }}
             {{- end }}
+          {{- if .Values.externalSecret.enabled }}
+          env:
+            # The schema was migrated by the init container; the runtime role
+            # (SELECT on product only) could not run Flyway anyway.
+            - name: SPRING_FLYWAY_ENABLED
+              value: "false"
+          {{- end }}
           startupProbe:
             httpGet:
               path: /actuator/health/liveness

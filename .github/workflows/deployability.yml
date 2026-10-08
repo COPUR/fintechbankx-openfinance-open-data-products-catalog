@@ -38,7 +38,7 @@ jobs:
       - name: Lint and render chart
         run: |
           chart=deploy/helm/open-products-catalog-service
-          args="--set image.repository=ci/open-products-catalog-service --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set config.DB_URL=jdbc:postgresql://ci-writer.example.internal:5432/db_of_open_products_catalog_ci"
+          args="--set image.repository=ci/open-products-catalog-service --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrateRemoteSecretName=ci/open-products-catalog-service/db-migrate --set config.DB_URL=jdbc:postgresql://ci-writer.example.internal:5432/db_of_open_products_catalog_ci"
           helm lint "$chart" $args
           helm template ci "$chart" $args > rendered.yaml
           helm template ci "$chart" -f "$chart/values-dev.yaml" $args > /dev/null

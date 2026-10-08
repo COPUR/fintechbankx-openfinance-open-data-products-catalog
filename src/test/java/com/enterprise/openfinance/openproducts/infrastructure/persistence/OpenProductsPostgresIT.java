@@ -52,6 +52,38 @@ class OpenProductsPostgresIT {
         jdbc.update("DELETE FROM " + SCHEMA + ".product WHERE product_id LIKE 'IT-%'");
     }
 
+    @Test
+    void everyInsertAndUpdateIsRecordedInTheAppendOnlyHistory() {
+        String user = jdbc.queryForObject("SELECT current_user", String.class);
+        long before = jdbc.queryForObject("SELECT coalesce(max(history_id), 0) FROM " + SCHEMA + ".product_history", Long.class);
+        jdbc.execute("SET application_name = 'import-products/it-operator'");
+        try {
+            insert("IT-HIST", "PCA", "ACTIVE", "2026-01-01T00:00:00Z", null);
+            jdbc.update("UPDATE " + SCHEMA + ".product SET monthly_fee_amount = 15.00, version = version + 1"
+                + " WHERE product_id = 'IT-HIST'");
+        } finally {
+            jdbc.execute("RESET application_name");
+        }
+
+        List<java.util.Map<String, Object>> history = jdbc.queryForList(
+            "SELECT operation, old_row->>'monthly_fee_amount' AS old_fee, new_row->>'monthly_fee_amount' AS new_fee,"
+                + " changed_by, application_name, changed_at IS NOT NULL AS stamped"
+                + " FROM " + SCHEMA + ".product_history WHERE product_id = 'IT-HIST' AND history_id > ? ORDER BY history_id", before);
+
+        assertThat(history).hasSize(2);
+        assertThat(history.get(0)).containsEntry("operation", "INSERT").containsEntry("old_fee", null)
+            .containsEntry("new_fee", "12.50").containsEntry("changed_by", user)
+            .containsEntry("application_name", "import-products/it-operator").containsEntry("stamped", true);
+        assertThat(history.get(1)).containsEntry("operation", "UPDATE").containsEntry("old_fee", "12.50")
+            .containsEntry("new_fee", "15.00");
+
+        assertThatThrownBy(() -> jdbc.update("UPDATE " + SCHEMA + ".product_history SET changed_by = 'someone-else'"
+                + " WHERE product_id = 'IT-HIST'"))
+            .hasMessageContaining("product_history is append-only");
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM " + SCHEMA + ".product_history WHERE product_id = 'IT-HIST'"))
+            .hasMessageContaining("product_history is append-only");
+    }
+
     private void insert(String id, String type, String status, String from, String to) {
         jdbc.update("INSERT INTO " + SCHEMA + ".product (product_id, product_type, segment, name, currency,"
                 + " monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from, effective_to, updated_at)"
@@ -71,7 +103,7 @@ class OpenProductsPostgresIT {
             "SELECT version || ':' || description FROM " + SCHEMA
                 + ".flyway_schema_history WHERE success AND version IS NOT NULL ORDER BY installed_rank", String.class);
 
-        assertThat(applied).containsExactly("1:create product catalogue");
+        assertThat(applied).containsExactly("1:create product catalogue", "2:product history and roles");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM " + SCHEMA
             + ".product WHERE product_id IN ('SAMPLE-PCA-001', 'SAMPLE-SAV-001', 'SAMPLE-SME-LOAN-01', 'SAMPLE-SME-PCA-01')", Integer.class))
             .isEqualTo(4);
