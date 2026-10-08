@@ -52,10 +52,6 @@ spec:
             cidr: {{ . }}
         {{- end }}
       {{- end }}
-    # Keycloak JWKS (OIDC issuer)
-    - ports:
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.oidcPort }}
     # OTLP traces to the platform collector
     - to:
         - namespaceSelector:

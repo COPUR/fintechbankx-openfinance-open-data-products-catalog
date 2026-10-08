@@ -51,9 +51,6 @@ config:
   DB_URL: ""                      # jdbc:postgresql://<aurora-writer-endpoint>:5432/db_of_open_products_catalog_<env>?sslmode=require
   DB_USERNAME: open_products_catalog_app
   DB_POOL_MAX: "10"
-  OIDC_ISSUER_URI: ""             # https://<identity-host>/realms/fintechbankx
-  OIDC_JWK_SET_URI: ""            # <issuer>/protocol/openid-connect/certs
-  OIDC_AUDIENCE: svc-of-open-products-catalog
   OPEN_PRODUCTS_SEED_ENABLED: "false"
   TRACING_ENABLED: "true"
   TRACING_SAMPLING_PROBABILITY: "0.1"
@@ -69,22 +66,16 @@ externalSecret:
   # (deploy/terraform output app_db_secret_name).
   remoteSecretName: ""
   refreshInterval: 1h
-  # The catalogue makes no outbound authenticated calls, so the Keycloak
-  # client secret (<env>/open-products-catalog-service/oidc-client) is not
-  # mounted unless a future feature needs client credentials.
-  oidcClient:
-    enabled: false
-    remoteSecretName: ""
 
 networkPolicy:
   enabled: true
   # Callers: the Istio ingress gateway; Prometheus scrapes the management port.
   gatewayNamespace: istio-ingress
   observabilityNamespace: observability
-  # Egress beyond DNS: the Aurora endpoint, Keycloak JWKS, OTLP and istiod.
+  # Egress beyond DNS: the Aurora endpoint, OTLP and istiod. No identity
+  # provider: no endpoint validates tokens.
   databasePort: 5432
   databaseCidrs: []               # VPC subnets of the Aurora cluster, e.g. ["10.0.32.0/20"]
-  oidcPort: 443
   otlpPort: 4318
 
 topologySpread:

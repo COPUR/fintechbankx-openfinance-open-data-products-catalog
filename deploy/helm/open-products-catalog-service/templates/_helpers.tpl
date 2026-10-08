@@ -23,7 +23,3 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- define "products.dbSecretName" -}}
 {{ include "products.name" . }}-db
 {{- end -}}
-
-{{- define "products.oidcSecretName" -}}
-{{ include "products.name" . }}-oidc-client
-{{- end -}}

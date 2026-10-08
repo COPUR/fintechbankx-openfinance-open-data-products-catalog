@@ -1,3 +1,4 @@
+{{- $_ := required "config.DB_URL is required (deploy/terraform output jdbc_url)" .Values.config.DB_URL }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,5 +8,8 @@ metadata:
     {{- include "products.labels" . | nindent 4 }}
 data:
   {{- range $key, $value := .Values.config }}
+  {{- /* Empty values are left out so application.yml defaults apply instead of "". */}}
+  {{- if $value }}
   {{ $key }}: {{ $value | quote }}
+  {{- end }}
   {{- end }}

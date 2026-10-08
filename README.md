@@ -80,7 +80,8 @@ product catalogue from its own PostgreSQL database
 
 API port 8080, management port 8081 (`/actuator/health/{liveness,readiness}`, `/actuator/prometheus`).
 Runtime settings come from the environment (`DB_URL`, `DB_USERNAME`, `SPRING_DATASOURCE_PASSWORD`,
-`OIDC_ISSUER_URI`, `OIDC_JWK_SET_URI`, `OIDC_AUDIENCE`, `OPEN_PRODUCTS_SEED_ENABLED`, `TRACING_ENABLED`).
+`OPEN_PRODUCTS_SEED_ENABLED`, `OPEN_PRODUCTS_SNAPSHOT_REFRESH`, `TRACING_ENABLED`). The endpoint is
+public, so the service needs no identity-provider settings.
 See [Deployment and Well-Architected notes](docs/architecture/DEPLOYMENT_AND_WELL_ARCHITECTED.md) and the
 [extraction runbook](docs/migration/RUNBOOK-EXTRACT-of-open-products-catalog.md).
 

@@ -34,12 +34,6 @@ spring:
     default-schema: sc_of_open_products_catalog
     create-schemas: true
     locations: classpath:db/migration
-  security:
-    oauth2:
-      resourceserver:
-        jwt:
-          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8180/realms/fintechbankx}
-          jwk-set-uri: ${OIDC_JWK_SET_URI:http://localhost:8180/realms/fintechbankx/protocol/openid-connect/certs}
 
 openproducts:
   catalog:
@@ -50,9 +44,6 @@ openproducts:
     snapshot-refresh: ${OPEN_PRODUCTS_SNAPSHOT_REFRESH:10s}
     # Sample rows from classpath:db/seed; true only in dev and CI.
     seed-enabled: ${OPEN_PRODUCTS_SEED_ENABLED:false}
-  security:
-    # Tokens must carry this audience (the service's Keycloak client id).
-    audience: ${OIDC_AUDIENCE:svc-of-open-products-catalog}
 
 server:
   port: 8080

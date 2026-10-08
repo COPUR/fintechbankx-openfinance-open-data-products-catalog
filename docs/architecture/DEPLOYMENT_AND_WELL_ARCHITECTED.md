@@ -33,15 +33,14 @@ ingress gateway. Everything here is **Proposed** until the owning squad deploys 
 
 - Public open data: the endpoint is anonymous by contract (`security: []`).
   Any `Authorization` header on it is ignored, never half-validated. Every other
-  path is denied. The JWT resource server is configured against the platform
-  Keycloak realm with issuer and audience (`svc-of-open-products-catalog`)
-  validation, ready for future authenticated endpoints.
+  path is denied. There is no OAuth2 resource server, JWT decoder or
+  identity-provider setting; add them with the first authenticated endpoint.
 - Responses contain catalogue data only (no customer data); the table is
   classified `public`, while the database itself stays private.
 - Pod: non-root, read-only root filesystem, all capabilities dropped,
   RuntimeDefault seccomp; Istio sidecar for mTLS; NetworkPolicy allows ingress
-  from the gateway and Prometheus only, and egress to DNS, PostgreSQL, OIDC,
-  OTLP and istiod.
+  from the gateway and Prometheus only, and egress to DNS, PostgreSQL, OTLP
+  and istiod.
 - Credentials: `<env>/open-products-catalog-service/db-app` in Secrets Manager
   (KMS-encrypted), synced by External Secrets (`aws-secrets-manager`). The IRSA
   role can read only that secret, its KMS key and its SSM parameters. Aurora

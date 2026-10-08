@@ -68,10 +68,6 @@ spec:
             {{- if .Values.externalSecret.enabled }}
             - secretRef:
                 name: {{ include "products.dbSecretName" . }}
-            {{- if .Values.externalSecret.oidcClient.enabled }}
-            - secretRef:
-                name: {{ include "products.oidcSecretName" . }}
-            {{- end }}
             {{- end }}
           startupProbe:
             httpGet:
