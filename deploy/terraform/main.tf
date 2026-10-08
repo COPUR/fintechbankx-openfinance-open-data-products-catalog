@@ -108,6 +108,23 @@ resource "aws_rds_cluster_parameter_group" "database" {
     name  = "log_min_duration_statement"
     value = "500"
   }
+
+  # Every DDL statement is logged, so the schema owner disabling or dropping
+  # the product_history triggers leaves a trace (alarm below, ADR-0001).
+  # Passwords are therefore set with psql \password (runbook section 2), which
+  # sends only a SCRAM verifier, never a plain-text PASSWORD '...'.
+  parameter {
+    name  = "log_statement"
+    value = "ddl"
+  }
+}
+
+# The cluster's exported PostgreSQL log. Managed here so its retention is set
+# and the tamper alarm has a log group to filter; created before the cluster
+# so RDS writes into it rather than creating its own.
+resource "aws_cloudwatch_log_group" "postgresql" {
+  name              = "/aws/rds/cluster/${local.name}-aurora/postgresql"
+  retention_in_days = var.environment == "prod" ? 365 : 30
 }
 
 resource "aws_rds_cluster" "database" {
@@ -133,6 +150,8 @@ resource "aws_rds_cluster" "database" {
   skip_final_snapshot                 = false
   final_snapshot_identifier           = "${local.name}-aurora-final"
   enabled_cloudwatch_logs_exports     = ["postgresql"]
+
+  depends_on = [aws_cloudwatch_log_group.postgresql]
 
   serverlessv2_scaling_configuration {
     min_capacity = var.aurora_min_capacity
@@ -267,6 +286,40 @@ resource "aws_cloudwatch_metric_alarm" "aurora_connections" {
   evaluation_periods  = 2
   threshold           = 100
   comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.alarm_topic_arn == "" ? [] : [var.alarm_topic_arn]
+}
+
+# Tamper detection for the append-only history: the schema owner can still
+# disable or drop its triggers or replace the history function (DDL, logged
+# by log_statement=ddl), and any role's rejected UPDATE, DELETE or TRUNCATE of
+# product_history logs "append-only". Terms are case-sensitive: lower- and
+# upper-case DDL are matched, mixed case is not (pgaudit would close that; see
+# ADR-0001). A migration that replaces product_history_record also fires it,
+# which is expected and reviewed with the release.
+resource "aws_cloudwatch_log_metric_filter" "history_tamper" {
+  name           = "${local.name}-history-tamper"
+  log_group_name = aws_cloudwatch_log_group.postgresql.name
+  pattern        = "?\"DISABLE TRIGGER\" ?\"disable trigger\" ?\"DROP TRIGGER\" ?\"drop trigger\" ?\"product_history_record\" ?\"append-only\""
+
+  metric_transformation {
+    name          = "ProductHistoryTamperSignals"
+    namespace     = "FinTechBankX/OpenProductsCatalog"
+    value         = "1"
+    default_value = "0"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "history_tamper" {
+  alarm_name          = "${local.name}-history-tamper"
+  alarm_description   = "A trigger was disabled or dropped, the history function replaced, or a product_history change rejected. Check the PostgreSQL log and product_history; expected only during a reviewed migration."
+  namespace           = "FinTechBankX/OpenProductsCatalog"
+  metric_name         = "ProductHistoryTamperSignals"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = var.alarm_topic_arn == "" ? [] : [var.alarm_topic_arn]
 }
