@@ -117,6 +117,29 @@ class OpenProductsPostgresIT {
             .hasMessageContaining("product_history is append-only");
     }
 
+    /** import-products.sh sets fbx.operator_arn from aws sts get-caller-identity; the history keeps it. */
+    @Test
+    void historyRecordsTheOperatorsAwsCallerIdentity() {
+        String arn = "arn:aws:sts::111122223333:assumed-role/CatalogueOperator/it-operator";
+        jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            try (var statement = connection.createStatement()) {
+                statement.execute("SELECT set_config('fbx.operator_arn', '" + arn + "', false)");
+                try {
+                    statement.execute("INSERT INTO " + SCHEMA + ".product (product_id, product_type, segment, name, currency,"
+                        + " monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from, updated_at)"
+                        + " VALUES ('IT-ARN', 'PCA', 'SME', 'Product IT-ARN', 'AED', 1.00, 'AED', 0.00, 'ACTIVE',"
+                        + " '2026-01-01T00:00:00Z', '2026-03-10T00:00:00Z')");
+                } finally {
+                    statement.execute("RESET fbx.operator_arn");
+                }
+            }
+            return null;
+        });
+
+        assertThat(jdbc.queryForObject("SELECT operator_arn FROM " + SCHEMA + ".product_history"
+            + " WHERE product_id = 'IT-ARN' ORDER BY history_id DESC LIMIT 1", String.class)).isEqualTo(arn);
+    }
+
     private void insert(String id, String type, String status, String from, String to) {
         jdbc.update("INSERT INTO " + SCHEMA + ".product (product_id, product_type, segment, name, currency,"
                 + " monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from, effective_to, updated_at)"

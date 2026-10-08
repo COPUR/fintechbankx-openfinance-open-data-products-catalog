@@ -12,7 +12,10 @@
 #   6. imports, then seeds, and checks every imported value survives the seed,
 #   7. checks timestamps need a UTC offset, and that a full import withdraws
 #      ACTIVE products missing from the file (a --delta import does not),
-#   8. checks the role privileges and the append-only product_history.
+#   8. checks the role privileges and the append-only product_history,
+#   9. checks every import change records the operator's AWS caller identity
+#      (aws sts get-caller-identity, stubbed here) and that the import role
+#      cannot change products without one.
 # There is no monolith data to backfill (ADR-0001), so there is no source DB.
 #
 # Needs psql and a superuser (it creates roles and a database), via the usual
@@ -37,7 +40,18 @@ import_secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 psql_q() { psql -X -q -v ON_ERROR_STOP=1 "$@"; }
 as_owner() { PGUSER="$owner" PGPASSWORD="$owner_secret" "$@"; }
 as_app() { PGUSER="$app" PGPASSWORD="$app_secret" "$@"; }
-as_importer() { PGUSER="$importer" PGPASSWORD="$import_secret" IMPORT_OPERATOR=rehearsal "$@"; }
+# Stand-in for the AWS CLI: the import asks STS who the operator is.
+operator_arn="arn:aws:sts::111122223333:assumed-role/CatalogueOperator/rehearsal"
+mkdir -p "$work/bin"
+cat > "$work/bin/aws" <<'STUB'
+#!/bin/sh
+[ "$*" = "sts get-caller-identity --query Arn --output text" ] || { echo "unexpected aws call: $*" >&2; exit 2; }
+[ -n "${FAKE_AWS_ARN:-}" ] || { echo "Unable to locate credentials" >&2; exit 255; }
+echo "$FAKE_AWS_ARN"
+STUB
+chmod +x "$work/bin/aws"
+with_aws() { PATH="$work/bin:$PATH" FAKE_AWS_ARN="$operator_arn" "$@"; }
+as_importer() { PGUSER="$importer" PGPASSWORD="$import_secret" IMPORT_OPERATOR=rehearsal with_aws "$@"; }
 # import [--full|--delta] <csv>: runs the import script as the import role.
 import() {
   local mode=()
@@ -148,7 +162,7 @@ fi
 grep -q "reserved SAMPLE- namespace" "$work/sample.err" || { cat "$work/sample.err" >&2; exit 1; }
 echo "ok   import refuses SAMPLE- ids"
 
-if IMPORT_OPERATOR=rehearsal as_owner "$root/db/import/import-products.sh" "dbname=$db" "$root/db/import/products.example.csv" 2> "$work/owner.err"; then
+if IMPORT_OPERATOR=rehearsal as_owner with_aws "$root/db/import/import-products.sh" "dbname=$db" "$root/db/import/products.example.csv" 2> "$work/owner.err"; then
   echo "FAIL import ran as the owner role" >&2
   exit 1
 fi
@@ -160,6 +174,21 @@ if PGUSER="$importer" PGPASSWORD="$import_secret" "$root/db/import/import-produc
   exit 1
 fi
 echo "ok   import requires IMPORT_OPERATOR"
+
+if PGUSER="$importer" PGPASSWORD="$import_secret" IMPORT_OPERATOR=rehearsal PATH="$work/bin:$PATH" \
+     "$root/db/import/import-products.sh" "dbname=$db" "$root/db/import/products.example.csv" 2> "$work/nocaller.err"; then
+  echo "FAIL import ran without an AWS caller identity" >&2
+  exit 1
+fi
+grep -q "AWS caller identity" "$work/nocaller.err" || { cat "$work/nocaller.err" >&2; exit 1; }
+echo "ok   import requires an AWS caller identity"
+if PGUSER="$importer" PGPASSWORD="$import_secret" IMPORT_OPERATOR=rehearsal PATH="$work/bin:$PATH" FAKE_AWS_ARN="arn:aws:iam::111122223333:root" \
+     "$root/db/import/import-products.sh" "dbname=$db" "$root/db/import/products.example.csv" 2> "$work/root.err"; then
+  echo "FAIL import ran as the AWS account root" >&2
+  exit 1
+fi
+grep -q "AWS caller identity" "$work/root.err" || { cat "$work/root.err" >&2; exit 1; }
+echo "ok   import refuses an account-root or malformed caller identity"
 
 # The dev seed must never revert an imported catalogue: import, then seed, then
 # the imported values (and their version/updated_at) must be unchanged.
@@ -227,11 +256,22 @@ denied "import role cannot truncate products" as_importer "TRUNCATE product"
 denied "import role cannot write the history directly" as_importer \
   "INSERT INTO product_history (product_id, operation, new_row, changed_by, login_role, application_name, transaction_id, changed_at) VALUES ('X', 'INSERT', '{}', 'x', 'x', 'x', 0, now())"
 denied "import role cannot change the schema" as_importer "ALTER TABLE product ADD COLUMN x int"
+# Bypassing the script: the import role's own writes need a caller identity.
+if as_importer psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET search_path = $schema" \
+     -c "UPDATE product SET name = name || ' x' WHERE product_id = 'SME-PCA-01'" 2> "$work/bypass.err"; then
+  echo "FAIL import role changed a product without a recorded AWS caller identity" >&2
+  exit 1
+fi
+grep -q "AWS caller identity" "$work/bypass.err" || { cat "$work/bypass.err" >&2; exit 1; }
+echo "ok   import role cannot change products without an AWS caller identity"
 denied "history rejects updates even from the owner" as_owner "UPDATE product_history SET changed_by = 'x'"
 denied "history rejects deletes even from the owner" as_owner "DELETE FROM product_history"
 check "every import change is in the history with role and operator" \
   "SELECT count(*) || ' ' || string_agg(DISTINCT changed_by || '/' || application_name, ',') FROM $schema.product_history WHERE product_id = 'SME-PCA-01' AND application_name LIKE 'import-products/%'" \
   "3 $importer/import-products/rehearsal"
+check "every import change records the operator's AWS caller identity" \
+  "SELECT count(*) || ' ' || string_agg(DISTINCT operator_arn, ',') FROM $schema.product_history WHERE product_id = 'SME-PCA-01' AND application_name LIKE 'import-products/%'" \
+  "3 $operator_arn"
 check "the history keeps old and new values of each update" \
   "SELECT string_agg((old_row->>'monthly_fee_amount') || '->' || (new_row->>'monthly_fee_amount'), ',' ORDER BY history_id) FROM $schema.product_history WHERE product_id = 'SME-PCA-01' AND operation = 'UPDATE'" \
   "35.00->30.00,30.00->25.00"
