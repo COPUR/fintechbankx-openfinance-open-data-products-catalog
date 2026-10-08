@@ -64,7 +64,7 @@ jobs:
               echo "chart rendered with networkPolicy.databaseCidrs containing $cidr"
               exit 1
             fi
-            grep -q "must not end in /0" cidr0.err
+            grep -q "never /0" cidr0.err
           done
       - name: Rendering fails for a database CIDR broader than /8 (IPv4) or /32 (IPv6)
         run: |

@@ -41,7 +41,8 @@ ingress gateway. Everything here is **Proposed** until the owning squad deploys 
   RuntimeDefault seccomp; Istio sidecar for mTLS; the mesh repo owns the namespace NetworkPolicy, and the chart's own one (`networkPolicy.enabled`, off by default) allows ingress
   from the gateway (8080), Prometheus (8081) and to the sidecar's probe ports
   (15020/15021), and egress to DNS, PostgreSQL (only `networkPolicy.databaseCidrs`;
-  the chart refuses to render without them or with a `/0` entry), OTLP and istiod.
+  the chart refuses to render without them or with an entry broader than
+  `/8` for IPv4 or `/32` for IPv6), OTLP and istiod.
 - Credentials: one role per duty, each in Secrets Manager under
   `<env>/open-products-catalog-service/` (KMS-encrypted): `db-app` (runtime,
   `SELECT` on `product`), `db-migration` (schema owner, used only by the

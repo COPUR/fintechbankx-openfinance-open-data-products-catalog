@@ -95,7 +95,7 @@ networkPolicy:
   # provider: no endpoint validates tokens.
   databasePort: 5432
   # Required: VPC subnets of the Aurora cluster, e.g. ["10.0.32.0/20"]; rendering
-  # fails when empty or when an entry ends in /0.
+  # fails when empty or for an entry broader than /8 (IPv4) or /32 (IPv6).
   databaseCidrs: []
   otlpPort: 4318
 
