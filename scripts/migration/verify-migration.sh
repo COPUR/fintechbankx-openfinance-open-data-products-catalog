@@ -306,9 +306,37 @@ if as_owner psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET search_path = $schema
   echo "FAIL the schema owner inserted a forged history row" >&2
   exit 1
 fi
-grep -q "only the history trigger" "$work/forge.err" || { cat "$work/forge.err" >&2; exit 1; }
+grep -qE "permission denied for table product_history|only the history trigger" "$work/forge.err" || { cat "$work/forge.err" >&2; exit 1; }
 echo "ok   direct inserts into product_history are refused, also for the owner"
-check "no forged row reached the history" "SELECT count(*) FROM $schema.product_history WHERE product_id = 'FORGED'" "0"
+# Review probe forge_src: a row trigger on any other table runs at depth 2.
+forge_src_sql='CREATE TABLE forge_src (id int);
+CREATE FUNCTION forge_fn() RETURNS trigger LANGUAGE plpgsql AS $f$
+BEGIN
+  INSERT INTO product_history (product_id, operation, new_row, changed_by, login_role, application_name, transaction_id, changed_at)
+  VALUES ('"'FORGED-SRC'"', '"'INSERT'"', '"'{}'"', '"'x'"', '"'x'"', '"'x'"', 0, now());
+  RETURN NULL;
+END $f$;
+CREATE TRIGGER trg_forge_src AFTER INSERT ON forge_src FOR EACH ROW EXECUTE FUNCTION forge_fn();
+INSERT INTO forge_src VALUES (1);'
+if as_owner psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET search_path = $schema" -c "$forge_src_sql" 2> "$work/forge_src.err"; then
+  echo "FAIL the schema owner forged history through a trigger on another table" >&2
+  exit 1
+fi
+grep -q "permission denied for table product_history" "$work/forge_src.err" || { cat "$work/forge_src.err" >&2; exit 1; }
+echo "ok   review probe forge_src: a trigger on another table cannot write the history"
+if as_owner psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET search_path = $schema" \
+     -c "CREATE TABLE forge_src2 (product_id text); CREATE TRIGGER trg_forge_src2 AFTER INSERT ON forge_src2 FOR EACH ROW EXECUTE FUNCTION product_history_record(); INSERT INTO forge_src2 VALUES ('FORGED-SRC2')" 2> "$work/forge_src2.err"; then
+  echo "FAIL the schema owner reused the history function on another table" >&2
+  exit 1
+fi
+grep -q "permission denied for function product_history_record" "$work/forge_src2.err" || { cat "$work/forge_src2.err" >&2; exit 1; }
+echo "ok   the history function cannot be attached to another table"
+check "no forged row reached the history" "SELECT count(*) FROM $schema.product_history WHERE product_id LIKE 'FORGED%'" "0"
+check "the schema owner holds no INSERT on the history" \
+  "SELECT has_table_privilege('$owner', '$schema.product_history', 'INSERT')::text" "false"
+check "the history writer (NOLOGIN) owns the recording function and alone may insert" \
+  "SELECT pg_get_userbyid(p.proowner) || ':' || p.prosecdef || ':' || r.rolcanlogin || ':' || has_table_privilege(r.rolname, '$schema.product_history', 'INSERT') FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.oid = '$schema.product_history_record()'::regprocedure" \
+  "open_products_catalog_history_writer:true:false:true"
 as_owner psql_q -d "$db" -c "SET search_path = $schema" \
   -c "INSERT INTO product (product_id, product_type, segment, name, currency, monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from, updated_at) VALUES ('DEL-001', 'PCA', 'RETAIL', 'To delete', 'AED', 1.00, 'AED', 0.00, 'ACTIVE', '2026-05-01T00:00:00Z', now())" \
   -c "DELETE FROM product WHERE product_id = 'DEL-001'"
@@ -350,6 +378,13 @@ refused "a new trigger on the history" \
   'CREATE FUNCTION skip_row() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NULL; END $f$; CREATE TRIGGER trg_skip BEFORE INSERT ON product_history FOR EACH ROW EXECUTE FUNCTION skip_row()'
 refused "a new trigger on product that could write forged history" \
   'CREATE FUNCTION forge_row() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NULL; END $f$; CREATE TRIGGER trg_forge AFTER UPDATE ON product FOR EACH ROW EXECUTE FUNCTION forge_row()'
+refused "review probe: the owner grants itself INSERT on the history" \
+  "GRANT INSERT ON product_history TO $owner"
+refused "grant the import role DELETE on product" "GRANT DELETE ON product TO $importer"
+refused "grant the runtime role SELECT on the history" "GRANT SELECT ON product_history TO $app"
+refused "grant the runtime role UPDATE on product" "GRANT UPDATE ON product TO $app"
+denied "the owner cannot take back or replace the recording function" as_owner \
+  "ALTER FUNCTION product_history_record() OWNER TO $owner"
 refused "drop the insert guard on the history" "DROP TRIGGER trg_product_history_insert_guard ON product_history"
 refused "replace the insert-guard function" \
   'CREATE OR REPLACE FUNCTION product_history_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NEW; END $f$'
