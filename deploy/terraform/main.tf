@@ -42,6 +42,8 @@ resource "aws_kms_key" "database" {
   description             = "Encrypts ${local.database} storage, snapshots, logs and credentials"
   enable_key_rotation     = true
   deletion_window_in_days = 30
+  # External Secrets Operator may decrypt only keys with this tag (platform contract addendum).
+  tags = { "fintechbankx.io/secrets" = "true" }
 }
 
 resource "aws_kms_alias" "database" {
@@ -176,18 +178,9 @@ resource "aws_iam_role" "workload" {
 }
 
 data "aws_iam_policy_document" "workload" {
-  statement {
-    sid       = "ReadOwnDatabaseCredential"
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [aws_secretsmanager_secret.app_database.arn, module.service_base.secret_arn]
-  }
-
-  statement {
-    sid       = "DecryptOwnDatabaseCredential"
-    actions   = ["kms:Decrypt"]
-    resources = [aws_kms_key.database.arn]
-  }
-
+  # Secrets reach the pod as Kubernetes Secrets synced by External Secrets
+  # Operator, whose own IRSA role reads and decrypts them. The workload role
+  # needs neither secretsmanager nor kms access.
   statement {
     sid       = "ReadOwnParameters"
     actions   = ["ssm:GetParameter", "ssm:GetParametersByPath"]
