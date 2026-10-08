@@ -10,7 +10,9 @@
 #   5. checks a bad CSV is rejected as a whole, SAMPLE- ids are refused and only
 #      the import role may import,
 #   6. imports, then seeds, and checks every imported value survives the seed,
-#   7. checks the role privileges and the append-only product_history.
+#   7. checks timestamps need a UTC offset, and that a full import withdraws
+#      ACTIVE products missing from the file (a --delta import does not),
+#   8. checks the role privileges and the append-only product_history.
 # There is no monolith data to backfill (ADR-0001), so there is no source DB.
 #
 # Needs psql and a superuser (it creates roles and a database), via the usual
@@ -36,7 +38,12 @@ psql_q() { psql -X -q -v ON_ERROR_STOP=1 "$@"; }
 as_owner() { PGUSER="$owner" PGPASSWORD="$owner_secret" "$@"; }
 as_app() { PGUSER="$app" PGPASSWORD="$app_secret" "$@"; }
 as_importer() { PGUSER="$importer" PGPASSWORD="$import_secret" IMPORT_OPERATOR=rehearsal "$@"; }
-import() { as_importer "$root/db/import/import-products.sh" "dbname=$db" "$@"; }
+# import [--full|--delta] <csv>: runs the import script as the import role.
+import() {
+  local mode=()
+  case "${1:-}" in --full|--delta) mode=("$1"); shift ;; esac
+  as_importer "$root/db/import/import-products.sh" "${mode[@]}" "dbname=$db" "$@"
+}
 
 check() {
   local label="$1" sql="$2" expected="$3" actual
@@ -167,6 +174,47 @@ check "seed after import leaves every imported row as imported" \
   "$imported"
 check "imported fee survives the seed" \
   "SELECT monthly_fee_amount FROM $schema.product WHERE product_id = 'SME-PCA-01'" "25.00"
+
+# Timestamps without an offset would be read in the session's time zone.
+{ head -n 1 "$root/db/import/products.example.csv"
+  echo "TZ-001,PCA,RETAIL,No Offset,,AED,1.00,0.00,,ACTIVE,2026-05-01T00:00:00,"
+} > "$work/nooffset.csv"
+if import --delta "$work/nooffset.csv" 2> "$work/nooffset.err"; then
+  echo "FAIL import accepted effective_from without a UTC offset" >&2
+  exit 1
+fi
+grep -q "without a UTC offset" "$work/nooffset.err" || { cat "$work/nooffset.err" >&2; exit 1; }
+check "a timestamp without offset changes nothing" "SELECT count(*) FROM $schema.product WHERE product_id = 'TZ-001'" "0"
+{ head -n 1 "$root/db/import/products.example.csv"
+  echo "TZ-002,PCA,RETAIL,Offset,,AED,1.00,0.00,,ACTIVE,2026-05-01T04:00:00+04:00,"
+} > "$work/offset.csv"
+import --delta "$work/offset.csv" > /dev/null
+check "an explicit offset is stored as UTC" \
+  "SELECT to_char(effective_from AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') FROM $schema.product WHERE product_id = 'TZ-002'" "2026-05-01 00:00"
+check "a delta import leaves products missing from the file alone" \
+  "SELECT status FROM $schema.product WHERE product_id = 'PCA-001'" "ACTIVE"
+
+# A full import (the default, for the signed-off catalogue) withdraws ACTIVE
+# products that are missing from the file; seed rows are never touched.
+PGOPTIONS="-c search_path=$schema" as_owner psql_q -d "$db" -f "$root/src/main/resources/db/seed/afterMigrate__sample_products.sql"
+grep -v '^SAV-001,' "$work/imported.csv" > "$work/full.csv"
+import "$work/full.csv" | tee "$work/import-full.log"
+grep -q "withdrawn: 2" "$work/import-full.log" || { echo "FAIL full import did not withdraw SAV-001 and TZ-002" >&2; exit 1; }
+check "full import withdraws ACTIVE products missing from the file" \
+  "SELECT string_agg(product_id || ':' || status || ':v' || version, ',' ORDER BY product_id) FROM $schema.product WHERE product_id IN ('SAV-001', 'TZ-002', 'CC-001')" \
+  "CC-001:DRAFT:v0,SAV-001:WITHDRAWN:v1,TZ-002:WITHDRAWN:v1"
+check "full import leaves the SAMPLE- seed rows alone" \
+  "SELECT count(*) FROM $schema.product WHERE product_id LIKE 'SAMPLE-%' AND status = 'ACTIVE'" "4"
+check "the withdrawal is in the history" \
+  "SELECT (old_row->>'status') || '->' || (new_row->>'status') FROM $schema.product_history WHERE product_id = 'SAV-001' ORDER BY history_id DESC LIMIT 1" \
+  "ACTIVE->WITHDRAWN"
+head -n 1 "$root/db/import/products.example.csv" > "$work/empty.csv"
+if import "$work/empty.csv" 2> "$work/empty.err"; then
+  echo "FAIL full import of an empty file was accepted" >&2
+  exit 1
+fi
+grep -q "no products" "$work/empty.err" || { cat "$work/empty.err" >&2; exit 1; }
+echo "ok   full import refuses an empty file"
 
 echo "--- roles and audit trail"
 check "runtime role reads the catalogue" \

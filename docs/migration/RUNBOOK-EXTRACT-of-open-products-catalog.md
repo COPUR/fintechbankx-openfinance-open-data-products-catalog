@@ -66,10 +66,13 @@ migration). No role can update or delete history rows.
    `SELECT grantee, privilege_type FROM information_schema.role_table_grants WHERE table_schema = 'sc_of_open_products_catalog' ORDER BY 1, 2;`
 4. Import the catalogue the product owner signed off, as the import role and
    with your operator id (it becomes `product_history.application_name`):
-   `IMPORT_OPERATOR=<your id> PGPASSWORD=... db/import/import-products.sh "host=<writer> dbname=db_of_open_products_catalog_<env> user=open_products_catalog_import sslmode=require" products.csv`
-   It prints `inserted / updated / unchanged`; a second run of the same file
-   must print `inserted: 0, updated: 0`. A bad row aborts the whole file. The
-   script refuses any other role.
+   `IMPORT_OPERATOR=<your id> PGPASSWORD=... db/import/import-products.sh --full "host=<writer> dbname=db_of_open_products_catalog_<env> user=open_products_catalog_import sslmode=require" products.csv`
+   `--full` (the default) treats the file as the whole catalogue and withdraws
+   `ACTIVE` products missing from it; use `--delta` only for a partial file.
+   It prints `inserted / updated / unchanged / withdrawn`; a second run of the
+   same file must print `inserted: 0, updated: 0` and `withdrawn: 0`. A bad
+   row aborts the whole file; `effective_from`/`effective_to` must carry an
+   offset (`Z` or `+04:00`). The script refuses any other role.
 5. `OPEN_PRODUCTS_SEED_ENABLED` stays `false` outside dev and CI.
 
 Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migration-rehearsal`).
@@ -129,7 +132,8 @@ service, not returning traffic to the monolith.
 - Release problem (5xx, latency, readiness): `helm rollback open-products-catalog-service <previous revision> -n open-finance`.
   Migrations are additive, so the previous release runs on the current schema.
 - Catalogue problem (row count, wrong values): re-import the previous signed-off
-  CSV (section 2, step 4); every change is in `product_history`.
+  CSV with `--full` (section 2, step 4), which also withdraws products the bad
+  file added; every change is in `product_history`.
 - Returning the route to the monolith is not a rollback: it serves sample data
   only. Use it only if the service cannot serve at all, and treat it as an incident.
 

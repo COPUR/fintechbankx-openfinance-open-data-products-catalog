@@ -5,13 +5,20 @@
 #   - existing, values changed  -> updated, updated_at = now(), version + 1
 #   - existing, values the same -> untouched (ETag stays stable)
 # Ids starting with SAMPLE- are reserved for the dev/CI seed and rejected.
-# Products missing from the CSV are left as they are; withdraw a product by
-# importing it with status WITHDRAWN (or an effective_to), never by deleting.
+# Modes:
+#   --full  (default) the file is the whole signed-off catalogue: ACTIVE
+#           products missing from it are withdrawn (status WITHDRAWN,
+#           version + 1); SAMPLE- seed rows are never touched. An empty file
+#           is refused.
+#   --delta the file holds only some products; products missing from it are
+#           left as they are.
+# Products are never deleted. effective_from/effective_to must carry a UTC
+# offset (2026-03-01T00:00:00Z or +04:00); they are stored as instants.
 # The whole file is applied in one transaction: any bad row aborts the import.
 # Every inserted or updated row is recorded in product_history (V2 trigger)
 # with the role and application_name "import-products/<operator>".
 #
-#   IMPORT_OPERATOR=<your id> db/import/import-products.sh <conninfo> <products.csv>
+#   IMPORT_OPERATOR=<your id> db/import/import-products.sh [--full|--delta] <conninfo> <products.csv>
 #
 # Runs only as the import role (open_products_catalog_import, credential in
 # <env>/open-products-catalog-service/db-import), which may SELECT, INSERT and
@@ -23,8 +30,13 @@
 #   annual_rate_percent,eligibility,status,effective_from,effective_to
 set -euo pipefail
 
+mode=full
+case "${1:-}" in
+  --full) mode=full; shift ;;
+  --delta) mode=delta; shift ;;
+esac
 if [ "$#" -ne 2 ]; then
-  echo "usage: $0 <conninfo> <products.csv>" >&2
+  echo "usage: $0 [--full|--delta] <conninfo> <products.csv>" >&2
   exit 2
 fi
 
@@ -59,11 +71,12 @@ fi
 
 # psql reads the CSV client-side (\copy), so the file never has to be on the DB host.
 csv_literal="${csv//\'/\'\'}"
-psql -X -q -v ON_ERROR_STOP=1 -v app_name="import-products/$operator" "$target_db" <<SQL
+psql -X -q -v ON_ERROR_STOP=1 -v app_name="import-products/$operator" -v mode="$mode" "$target_db" <<SQL
 \set QUIET on
 BEGIN;
 SET LOCAL search_path = $schema;
 SET LOCAL application_name = :'app_name';
+SET LOCAL TimeZone = 'UTC';
 
 -- Only the import role may load the catalogue (never the owner or an admin).
 DO \$\$
@@ -85,8 +98,9 @@ CREATE TEMP TABLE product_import (
     annual_rate_percent numeric,
     eligibility         text,
     status              text,
-    effective_from      timestamptz,
-    effective_to        timestamptz
+    -- Read as text so a value without an offset can be rejected, not guessed.
+    effective_from      text,
+    effective_to        text
 ) ON COMMIT DROP;
 
 \copy product_import FROM '$csv_literal' WITH (FORMAT csv, HEADER true)
@@ -100,7 +114,9 @@ UPDATE product_import SET
     description  = nullif(btrim(description), ''),
     currency     = upper(btrim(currency)),
     eligibility  = nullif(btrim(eligibility), ''),
-    status       = upper(btrim(coalesce(nullif(status, ''), 'ACTIVE')));
+    status       = upper(btrim(coalesce(nullif(status, ''), 'ACTIVE'))),
+    effective_from = btrim(effective_from),
+    effective_to   = nullif(btrim(effective_to), '');
 
 DO \$\$
 DECLARE
@@ -117,6 +133,16 @@ BEGIN
      WHERE upper(product_id) LIKE 'SAMPLE-%';
     IF dup IS NOT NULL THEN
         RAISE EXCEPTION 'product_id in the reserved SAMPLE- namespace: %', dup;
+    END IF;
+    SELECT string_agg(product_id, ', ') INTO dup
+      FROM product_import
+     WHERE effective_from !~ '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}(:?\d{2})?)\$'
+        OR effective_to   !~ '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}(:?\d{2})?)\$';
+    IF dup IS NOT NULL THEN
+        RAISE EXCEPTION 'effective_from/effective_to without a UTC offset (use Z or +hh:mm) for: %', dup;
+    END IF;
+    IF '$mode' = 'full' AND NOT EXISTS (SELECT 1 FROM product_import) THEN
+        RAISE EXCEPTION 'a full import with no products would withdraw the whole catalogue';
     END IF;
     -- Money is never rounded on import: more than two decimals is an error.
     SELECT string_agg(product_id, ', ') INTO dup
@@ -135,7 +161,7 @@ WITH upserted AS (
                               eligibility, status, effective_from, effective_to, updated_at)
     SELECT product_id, product_type, segment, name, description, currency,
            monthly_fee_amount, currency, annual_rate_percent,
-           eligibility, status, effective_from, effective_to, now()
+           eligibility, status, effective_from::timestamptz, effective_to::timestamptz, now()
       FROM product_import
     ON CONFLICT (product_id) DO UPDATE SET
         product_type         = EXCLUDED.product_type,
@@ -166,6 +192,20 @@ SELECT format('rows in file: %s, inserted: %s, updated: %s, unchanged: %s',
               count(*) FILTER (WHERE NOT inserted),
               (SELECT count(*) FROM product_import) - count(*)) AS import_summary
   FROM upserted \gset
-\echo :import_summary
+
+-- Full import: ACTIVE products missing from the file are withdrawn, never deleted.
+WITH withdrawn AS (
+    UPDATE product p SET
+        status     = 'WITHDRAWN',
+        updated_at = now(),
+        version    = p.version + 1
+     WHERE :'mode' = 'full'
+       AND p.status = 'ACTIVE'
+       AND p.product_id NOT LIKE 'SAMPLE-%'
+       AND NOT EXISTS (SELECT 1 FROM product_import i WHERE i.product_id = p.product_id)
+    RETURNING 1
+)
+SELECT format('mode: %s, withdrawn: %s', :'mode', count(*)) AS withdraw_summary FROM withdrawn \gset
+\echo :import_summary, :withdraw_summary
 COMMIT;
 SQL

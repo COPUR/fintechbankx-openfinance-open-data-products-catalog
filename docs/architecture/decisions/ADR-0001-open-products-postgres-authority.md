@@ -44,7 +44,10 @@ So there is **no monolith catalogue data to backfill**.
    not been rehearsed yet (see open questions).
 3. The catalogue is loaded by an operator job: `db/import/import-products.sh`
    upserts a CSV in one transaction (new rows inserted, changed rows updated
-   with `version + 1`, unchanged rows left alone). The four former in-memory
+   with `version + 1`, unchanged rows left alone). By default (`--full`) the
+   file is the whole signed-off catalogue and `ACTIVE` products missing from it
+   are withdrawn; `--delta` loads a partial file. Effective dates must carry a
+   UTC offset. The four former in-memory
    rows are dev/CI sample data in `classpath:db/seed`, applied only when
    `OPEN_PRODUCTS_SEED_ENABLED=true`. The seed is insert-only and uses
    `SAMPLE-` ids, which the import refuses, so it can never change imported data.
