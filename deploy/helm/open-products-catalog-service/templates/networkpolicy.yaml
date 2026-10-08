@@ -11,6 +11,21 @@
 {{- if or (ne (len $parts) 2) (not (regexMatch "^[0-9]{1,3}$" (last $parts))) (lt (atoi (last $parts)) $floor) }}
 {{- fail (printf "networkPolicy.databaseCidrs entry %q is too broad or not a CIDR: IPv4 needs a prefix of /8 or longer, IPv6 /32 or longer (never /0); list the Aurora subnets' CIDRs only" $cidr) }}
 {{- end }}
+{{- /* Private ranges only: 10/8, 172.16/12, 192.168/16, fc00::/7. IPv4-mapped IPv6 is refused. */}}
+{{- $addr := first $parts }}
+{{- $prefix := atoi (last $parts) }}
+{{- $private := false }}
+{{- if contains ":" $addr }}
+{{- $private = and (regexMatch "^[fF][cdCD][0-9a-fA-F]{2}:[0-9a-fA-F:]*$" $addr) (le $prefix 128) }}
+{{- else if regexMatch "^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$" $addr }}
+{{- $o := splitList "." $addr }}
+{{- $a := atoi (index $o 0) }}{{- $b := atoi (index $o 1) }}
+{{- $valid := and (le $a 255) (le $b 255) (le (atoi (index $o 2)) 255) (le (atoi (index $o 3)) 255) (le $prefix 32) }}
+{{- $private = and $valid (or (eq $a 10) (and (eq $a 172) (ge $b 16) (le $b 31) (ge $prefix 12)) (and (eq $a 192) (eq $b 168) (ge $prefix 16))) }}
+{{- end }}
+{{- if not $private }}
+{{- fail (printf "networkPolicy.databaseCidrs entry %q is not inside a private range (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7; no IPv4-mapped IPv6): list the Aurora subnets' CIDRs only" $cidr) }}
+{{- end }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
