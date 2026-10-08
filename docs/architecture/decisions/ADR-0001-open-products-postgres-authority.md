@@ -69,8 +69,9 @@ So there is **no monolith catalogue data to backfill**.
   and the import role can `SELECT`, `INSERT` and `UPDATE` it.
 - The service's database load is at most one indexed query per pod per
   snapshot interval; Aurora Serverless v2 can run at a low minimum capacity.
-- Request-rate limiting (`429` with `Retry-After`) is the API gateway's job and
-  is a dependency on the service-mesh repository, not on this service.
+- Request-rate limiting is the API gateway's job (mesh PR #11, `5e756f0`:
+  100-token bucket refilled at 50/s per gateway pod, `429` with `Retry-After`
+  and `x-fbx-rate-limited: true`), a dependency on the service-mesh repository.
 - Until the outbox exists, other services cannot subscribe to catalogue changes;
   they call the API (and can use the ETag).
 

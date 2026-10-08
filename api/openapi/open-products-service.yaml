@@ -69,14 +69,21 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '429':
           description: >-
-            Too many requests. Returned by the API gateway's rate limit, not by
-            the service; retry after the number of seconds in Retry-After.
+            Too many requests. Returned by the API gateway's rate limit (a token
+            bucket of 100 refilled at 50 per second, per gateway pod), not by the
+            service; retry after the number of seconds in Retry-After.
           headers:
             Retry-After:
               description: Seconds to wait before retrying.
               schema:
                 type: integer
                 minimum: 0
+            x-fbx-rate-limited:
+              description: Set to true by the gateway when it rejected the request for its rate limit.
+              schema:
+                type: string
+                enum:
+                  - 'true'
 components:
   parameters:
     InteractionId:
