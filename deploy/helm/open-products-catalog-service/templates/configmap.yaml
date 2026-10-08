@@ -10,6 +10,20 @@
 {{- if not (and (regexMatch "[?&]sslmode=verify-full(&|$)" .Values.config.DB_URL) (regexMatch (printf "[?&]%s(&|$)" (regexQuoteMeta $ca)) .Values.config.DB_URL)) }}
 {{- fail (printf "config.DB_URL must use sslmode=verify-full&%s (deploy/terraform output jdbc_url)" $ca) }}
 {{- end }}
+{{- /* Nothing else in the query unless allow-listed: sslfactory, sslhostnameverifier,
+       service, sslcert, ... can switch verification off or redirect the connection. */}}
+{{- $query := index (splitList "?" .Values.config.DB_URL) 1 }}
+{{- if or (contains "#" $query) (contains "?" $query) }}
+{{- fail "config.DB_URL: a fragment or a second '?' is not allowed" }}
+{{- end }}
+{{- range $pair := splitList "&" $query }}
+{{- $name := lower (first (splitList "=" $pair)) }}
+{{- if not (has $name (list "sslmode" "sslrootcert")) }}
+{{- if or (hasPrefix "ssl" $name) (eq $name "service") (not (has (first (splitList "=" $pair)) $.Values.databaseUrlAllowedParams)) }}
+{{- fail (printf "config.DB_URL parameter %q is not allowed: the query must be sslmode=verify-full&%s plus databaseUrlAllowedParams (never ssl* or service)" $pair $ca) }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

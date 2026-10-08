@@ -69,6 +69,11 @@ databaseCaBundle:
   key: global-bundle.pem
   mountPath: /etc/fintechbankx/rds-ca
 
+# Extra JDBC URL parameters allowed in config.DB_URL besides sslmode and
+# sslrootcert (exact names, e.g. ["connectTimeout"]). ssl* and service are
+# refused even when listed.
+databaseUrlAllowedParams: []
+
 # Credentials synced from AWS Secrets Manager by External Secrets Operator.
 externalSecret:
   enabled: true
