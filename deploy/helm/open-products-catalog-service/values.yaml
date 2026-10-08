@@ -48,13 +48,26 @@ podDisruptionBudget:
 
 # Non-secret runtime settings, rendered into a ConfigMap.
 config:
-  DB_URL: ""                      # jdbc:postgresql://<aurora-writer-endpoint>:5432/db_of_open_products_catalog_<env>?sslmode=require
+  # deploy/terraform output jdbc_url:
+  # jdbc:postgresql://<aurora-writer-endpoint>:5432/db_of_open_products_catalog_<env>?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem
+  # Rendering fails unless it verifies the server certificate against databaseCaBundle.
+  DB_URL: ""
   DB_USERNAME: open_products_catalog_app
   DB_POOL_MAX: "10"
   OPEN_PRODUCTS_SEED_ENABLED: "false"
   TRACING_ENABLED: "true"
   TRACING_SAMPLING_PROBABILITY: "0.1"
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4318/v1/traces
+
+# Amazon RDS CA bundle for PostgreSQL TLS (sslmode=verify-full). The platform's
+# trust-manager publishes ConfigMap rds-ca-bundle (key global-bundle.pem) into
+# every service namespace; the chart mounts it read-only into the migrate init
+# container and the service container, and config.DB_URL must point
+# sslrootcert at <mountPath>/<key>.
+databaseCaBundle:
+  configMapName: rds-ca-bundle
+  key: global-bundle.pem
+  mountPath: /etc/fintechbankx/rds-ca
 
 # Credentials synced from AWS Secrets Manager by External Secrets Operator.
 externalSecret:

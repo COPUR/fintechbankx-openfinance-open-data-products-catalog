@@ -41,14 +41,17 @@ ingress gateway. Everything here is **Proposed** until the owning squad deploys 
   RuntimeDefault seccomp; Istio sidecar for mTLS; the mesh repo owns the namespace NetworkPolicy, and the chart's own one (`networkPolicy.enabled`, off by default) allows ingress
   from the gateway (8080), Prometheus (8081) and to the sidecar's probe ports
   (15020/15021), and egress to DNS, PostgreSQL (only `networkPolicy.databaseCidrs`;
-  the chart refuses to render without them), OTLP and istiod.
+  the chart refuses to render without them or with a `/0` entry), OTLP and istiod.
 - Credentials: one role per duty, each in Secrets Manager under
   `<env>/open-products-catalog-service/` (KMS-encrypted): `db-app` (runtime,
   `SELECT` on `product`), `db-migration` (schema owner, used only by the
   `migrate` init container) and `db-import` (operators; no `DELETE`). External
   Secrets (`aws-secrets-manager`) syncs `db-app` and `db-migration`; the pod's
   IRSA role reads only its SSM parameters. Every catalogue change lands in the
-  append-only `product_history`. Aurora enforces TLS (`rds.force_ssl`).
+  append-only `product_history`. Aurora enforces TLS (`rds.force_ssl`), and
+  JDBC verifies the server certificate and host name (`sslmode=verify-full`)
+  against the platform's RDS CA bundle (ConfigMap `rds-ca-bundle`, mounted
+  read-only at `/etc/fintechbankx/rds-ca`); the chart refuses any other `DB_URL`.
 
 ## Performance efficiency
 

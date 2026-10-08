@@ -1,4 +1,9 @@
 {{- $_ := required "config.DB_URL is required (deploy/terraform output jdbc_url)" .Values.config.DB_URL }}
+{{- /* Aurora's certificate is verified against the platform RDS CA bundle (platform contract, Database CA bundle). */}}
+{{- $ca := printf "sslrootcert=%s/%s" .Values.databaseCaBundle.mountPath .Values.databaseCaBundle.key }}
+{{- if not (and (regexMatch "[?&]sslmode=verify-full(&|$)" .Values.config.DB_URL) (contains $ca .Values.config.DB_URL)) }}
+{{- fail (printf "config.DB_URL must use sslmode=verify-full&%s (deploy/terraform output jdbc_url)" $ca) }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
