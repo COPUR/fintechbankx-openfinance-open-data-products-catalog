@@ -15,7 +15,10 @@
 #   8. checks the role privileges and the append-only product_history,
 #   9. checks every import change records the operator's AWS caller identity
 #      (aws sts get-caller-identity, stubbed here) and that the import role
-#      cannot change products without one.
+#      cannot change products without one,
+#  10. checks the schema owner cannot disable, drop or replace the history's
+#      triggers, functions or table, however the DDL is spelled or nested
+#      (review probes), and that the triggers and function bodies are intact.
 # There is no monolith data to backfill (ADR-0001), so there is no source DB.
 #
 # Needs psql and a superuser (it creates roles and a database), via the usual
@@ -66,6 +69,17 @@ check() {
     echo "FAIL $label: expected '$expected', got '$actual'" >&2
     exit 1
   fi
+  echo "ok   $label"
+}
+
+# Runs SQL as the schema owner and expects the history guard to refuse it.
+refused() {
+  local label="$1" sql="$2"
+  if as_owner psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET search_path = $schema" -c "$sql" 2> "$work/refused.err"; then
+    echo "FAIL $label: the schema owner was allowed to run it" >&2
+    exit 1
+  fi
+  grep -q "product_history guard" "$work/refused.err" || { cat "$work/refused.err" >&2; exit 1; }
   echo "ok   $label"
 }
 
@@ -275,6 +289,42 @@ check "every import change records the operator's AWS caller identity" \
 check "the history keeps old and new values of each update" \
   "SELECT string_agg((old_row->>'monthly_fee_amount') || '->' || (new_row->>'monthly_fee_amount'), ',' ORDER BY history_id) FROM $schema.product_history WHERE product_id = 'SME-PCA-01' AND operation = 'UPDATE'" \
   "35.00->30.00,30.00->25.00"
+
+echo "--- schema owner cannot tamper with the history (review probes)"
+integrity_sql="SELECT string_agg(t.tgname || ':' || t.tgenabled::text || ':' || md5(p.prosrc), ',' ORDER BY t.tgname)
+  FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+ WHERE t.tgrelid IN ('$schema.product'::regclass, '$schema.product_history'::regclass) AND NOT t.tgisinternal"
+intact="$(psql -X -At -d "$db" -c "$integrity_sql")"
+case "$intact" in
+  trg_product_history:O:*,trg_product_history_no_change:O:*,trg_product_history_no_truncate:O:*) ;;
+  *) echo "FAIL history triggers before the probes: $intact" >&2; exit 1 ;;
+esac
+refused "probe 1: replace the append-only function to return OLD" \
+  'CREATE OR REPLACE FUNCTION product_history_append_only() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN OLD; END $f$'
+denied "probe 1: history deletes are still rejected afterwards" as_owner "DELETE FROM product_history"
+refused "probe 2: DISABLE TRIGGER built by string concatenation inside DO/EXECUTE" \
+  "DO \$d\$ BEGIN EXECUTE 'ALTER TABLE product DIS' || 'ABLE TRIGGER trg_product_history'; END \$d\$"
+refused "probe 3: spacing and case variants of DISABLE TRIGGER" \
+  "alter   table   product   Disable   Trigger   trg_product_history"
+refused "disable every user trigger on the history" "ALTER TABLE product_history DISABLE TRIGGER USER"
+refused "disable all triggers on the history" "ALTER TABLE product_history DISABLE TRIGGER ALL"
+refused "turn a history trigger into a replica-only trigger" \
+  "ALTER TABLE product_history ENABLE REPLICA TRIGGER trg_product_history_no_change"
+refused "drop the history-recording trigger" "DROP TRIGGER trg_product_history ON product"
+refused "drop an append-only trigger" "DROP TRIGGER trg_product_history_no_truncate ON product_history"
+refused "drop the append-only function with its triggers" "DROP FUNCTION product_history_append_only() CASCADE"
+refused "make the recording function SECURITY INVOKER" "ALTER FUNCTION product_history_record() SECURITY INVOKER"
+refused "replace the recording function" \
+  'CREATE OR REPLACE FUNCTION product_history_record() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $f$ BEGIN RETURN NULL; END $f$'
+refused "drop the history table" "DROP TABLE product_history"
+refused "rename the history table" "ALTER TABLE product_history RENAME TO product_history_old"
+refused "drop a history column" "ALTER TABLE product_history DROP COLUMN operator_arn"
+refused "a rule that swallows history inserts" "CREATE RULE skip_history AS ON INSERT TO product_history DO INSTEAD NOTHING"
+refused "a new trigger on the history" \
+  'CREATE FUNCTION skip_row() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NULL; END $f$; CREATE TRIGGER trg_skip BEFORE INSERT ON product_history FOR EACH ROW EXECUTE FUNCTION skip_row()'
+check "history triggers enabled and function bodies unchanged after the probes" "$integrity_sql" "$intact"
+as_owner psql_q -d "$db" -c "SET search_path = $schema" -c "ALTER TABLE product ADD COLUMN guard_probe int" -c "ALTER TABLE product DROP COLUMN guard_probe"
+echo "ok   other DDL by the schema owner (future migrations) still runs"
 
 psql_q -d postgres -c "DROP DATABASE $db"
 echo "Migration, seed and import rehearsal passed."
