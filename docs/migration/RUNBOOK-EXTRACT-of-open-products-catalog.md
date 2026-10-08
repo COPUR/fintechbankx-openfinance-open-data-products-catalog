@@ -37,18 +37,108 @@ The database has three login roles, each with its own Secrets Manager secret
 
 Every insert or update of `product` writes an append-only row to
 `product_history` (old and new values, role, `application_name`, time; V2
-migration). No role can update or delete history rows.
+migration; since V3 also `operator_arn`, the importing operator's AWS caller
+identity). The runtime and import roles cannot update or delete history rows;
+the schema owner can, so its DDL is logged (`log_statement=ddl`) and a
+disabled or dropped history trigger raises the `<env>-open-products-catalog-service-history-tamper`
+alarm (ADR-0001).
+
+### 2.1 Where operator database work runs
+
+The Aurora writer has no public path. Steps 2 and 4 run `psql` from one of:
+
+- the **operator host** of the environment: an EC2 instance in a private
+  subnet of the cluster's VPC, no public IP, no inbound rules, reached only
+  through AWS Systems Manager Session Manager (no SSH, no port forwarding to a
+  laptop);
+- a **self-hosted CI agent** inside the same VPC, for a reviewed, scripted run.
+
+Neither is created by this repository; the environment's platform stack
+provides it.
+
+Its security group must be in the Terraform variable
+`operator_security_group_ids`; Terraform then adds one PostgreSQL (5432)
+ingress rule per group to the database security group, by security-group
+reference only (the variable refuses CIDRs and the workload group). The host
+needs `psql` 16, AWS CLI v2 and `jq`.
+
+**Credentials** come from the operator's own AWS identity (IAM Identity Center
+session or a role assumed for the task), never from the cluster:
+
+- the import credential `<env>/open-products-catalog-service/db-import` is not
+  synced into Kubernetes (the chart's ExternalSecret maps only `db-app` and
+  `db-migration`; keep it that way). The operator's permission set needs
+  `secretsmanager:GetSecretValue` on that secret and `kms:Decrypt` on
+  `alias/<env>-open-products-catalog-service-db`;
+- the DBA bootstrap uses the RDS-managed admin secret (output
+  `master_user_secret_arn`), fetched the same way by the DBA's principal.
+
+Read the value into the environment of the one command that needs it, never
+into a file, ticket or shell history:
+
+```sh
+export PGPASSWORD="$(aws secretsmanager get-secret-value \
+  --secret-id <env>/open-products-catalog-service/db-import \
+  --query SecretString --output text | jq -r .password)"
+# ... run the step, then:
+unset PGPASSWORD
+```
+
+**TLS**: connect with `sslmode=verify-full` against the Amazon RDS CA bundle,
+the same `global-bundle.pem` that trust-manager publishes to the pods as
+ConfigMap `rds-ca-bundle`. On the host, download it once from the public AWS
+trust store:
+
+```sh
+mkdir -p "$HOME/rds-ca"
+curl -fsS -o "$HOME/rds-ca/global-bundle.pem" https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+```
+
+**Attribution**: CloudTrail records every `GetSecretValue` on `db-import`
+(and on the admin secret) with the caller's IAM principal
+(`userIdentity.arn`) and time. `import-products.sh` writes the same
+principal, from `aws sts get-caller-identity`, into
+`product_history.operator_arn` for every row it changes. To tie a change to a
+fetch: take `operator_arn` and `changed_at` from the history row and find the
+matching event:
+
+```sh
+aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=GetSecretValue \
+  --start-time <changed_at minus 12 h> --end-time <changed_at> \
+  --query 'Events[].CloudTrailEvent' --output text | jq -c 'select(.requestParameters.secretId | test("open-products-catalog-service/db-import")) | {time: .eventTime, who: .userIdentity.arn}'
+```
+
+The import role is still one shared password: the ARN in the history is
+what the script read from STS, and someone who fetched the password could
+connect without the script and type another ARN. The database refuses import
+changes without an ARN, and CloudTrail shows who fetched the password; see
+ADR-0001 (residual risk). Rotate the `db-import` password after each
+production import window (step 2's `\password`, then `put-secret-value`).
+
+### 2.2 Steps
 
 1. Terraform creates the cluster and the three empty secrets (outputs
-   `app_db_secret_name`, `migration_db_secret_name`, `import_db_secret_name`).
-2. DBA bootstrap, once per environment, connected with the RDS-managed admin
-   credential (output `master_user_secret_arn`) to `db_of_open_products_catalog_<env>`.
-   Generate each password into the secret directly (never into a file or ticket):
+   `app_db_secret_name`, `migration_db_secret_name`, `import_db_secret_name`),
+   with `operator_security_group_ids` set to the operator host's or CI agent's
+   security group (section 2.1).
+2. DBA bootstrap, once per environment, from the operator host (section 2.1),
+   connected with the RDS-managed admin credential to
+   `db_of_open_products_catalog_<env>`:
+   `psql "host=<writer> dbname=db_of_open_products_catalog_<env> user=open_products_admin sslmode=verify-full sslrootcert=$HOME/rds-ca/global-bundle.pem"`.
+   Generate each password straight into its secret
+   (`aws secretsmanager get-random-password` piped into `put-secret-value`, never
+   into a file or ticket). Aurora logs every DDL statement
+   (`log_statement=ddl`), so never write `PASSWORD '...'`: create the roles
+   without one and set it with psql's `\password`, which sends only a SCRAM
+   verifier (paste the value from the secret at the prompt):
 
    ```sql
-   CREATE ROLE open_products_catalog_owner  LOGIN PASSWORD '<generated>';
-   CREATE ROLE open_products_catalog_app    LOGIN PASSWORD '<generated>';
-   CREATE ROLE open_products_catalog_import LOGIN PASSWORD '<generated>';
+   CREATE ROLE open_products_catalog_owner  LOGIN;
+   CREATE ROLE open_products_catalog_app    LOGIN;
+   CREATE ROLE open_products_catalog_import LOGIN;
+   \password open_products_catalog_owner
+   \password open_products_catalog_app
+   \password open_products_catalog_import
    REVOKE ALL ON DATABASE db_of_open_products_catalog_<env> FROM PUBLIC;
    GRANT CONNECT, CREATE    ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_owner;
    GRANT CONNECT            ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_app;
@@ -59,14 +149,21 @@ migration). No role can update or delete history rows.
    runtime and import privileges only to roles that exist when it runs (it
    logs a NOTICE otherwise). If a role was created late, re-run the two grants
    from `V2__product_history_and_roles.sql` as the owner.
-3. Deploy the chart with `externalSecret.remoteSecretName` (db-app) and
-   `externalSecret.migrationRemoteSecretName` (db-migration). The `migrate` init
+3. Deploy the chart with `externalSecret.remoteSecretName` (db-app),
+   `externalSecret.migrationRemoteSecretName` (db-migration) and
+   `config.DB_URL` from the Terraform output `jdbc_url`
+   (`sslmode=verify-full`, `sslrootcert` on the mounted `rds-ca-bundle`; the
+   chart refuses any other URL). The `migrate` init
    container runs Flyway as the owner and exits; the service then starts with
    the runtime role and Flyway disabled. Check:
    `SELECT grantee, privilege_type FROM information_schema.role_table_grants WHERE table_schema = 'sc_of_open_products_catalog' ORDER BY 1, 2;`
-4. Import the catalogue the product owner signed off, as the import role and
-   with your operator id (it becomes `product_history.application_name`):
-   `IMPORT_OPERATOR=<your id> PGPASSWORD=... db/import/import-products.sh --full "host=<writer> dbname=db_of_open_products_catalog_<env> user=open_products_catalog_import sslmode=require" products.csv`
+4. Import the catalogue the product owner signed off, from the operator host
+   (section 2.1), as the import role, signed in to AWS as yourself. The script
+   records your AWS caller identity in `product_history.operator_arn` (it
+   refuses to run without one, or as the account root) and your operator id
+   in `application_name`; with `PGPASSWORD` exported from `db-import` as in
+   section 2.1:
+   `IMPORT_OPERATOR=<your id> db/import/import-products.sh --full "host=<writer> dbname=db_of_open_products_catalog_<env> user=open_products_catalog_import sslmode=verify-full sslrootcert=$HOME/rds-ca/global-bundle.pem" products.csv`
    `--full` (the default) treats the file as the whole catalogue and withdraws
    `ACTIVE` products missing from it; use `--delta` only for a partial file.
    It prints `inserted / updated / unchanged / withdrawn`; a second run of the
@@ -92,6 +189,12 @@ service, not returning traffic to the monolith.
 - `ClusterSecretStore` `aws-secrets-manager` (platform External Secrets),
   able to read `<env>/open-products-catalog-service/db-app` and `db-migration`
   and decrypt with the service's tagged KMS key.
+- ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) in `open-finance`,
+  published by the platform's trust-manager (mesh repo,
+  `k8s/platform/cert-manager/bundle-rds-ca.yaml`); without it the pods do not
+  start.
+- The operator host or in-VPC CI agent, with its security group in
+  `operator_security_group_ids` (section 2.1).
 - The DBA bootstrap in section 2 (three roles) done before the first deploy.
 
 **Steps**
