@@ -39,8 +39,9 @@ ingress gateway. Everything here is **Proposed** until the owning squad deploys 
   classified `public`, while the database itself stays private.
 - Pod: non-root, read-only root filesystem, all capabilities dropped,
   RuntimeDefault seccomp; Istio sidecar for mTLS; NetworkPolicy allows ingress
-  from the gateway and Prometheus only, and egress to DNS, PostgreSQL, OTLP
-  and istiod.
+  from the gateway (8080), Prometheus (8081) and to the sidecar's probe ports
+  (15020/15021), and egress to DNS, PostgreSQL (only `networkPolicy.databaseCidrs`;
+  the chart refuses to render without them), OTLP and istiod.
 - Credentials: one role per duty, each in Secrets Manager under
   `<env>/open-products-catalog-service/` (KMS-encrypted): `db-app` (runtime,
   `SELECT` on `product`), `db-migration` (schema owner, used only by the

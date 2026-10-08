@@ -38,10 +38,20 @@ jobs:
       - name: Lint and render chart
         run: |
           chart=deploy/helm/open-products-catalog-service
-          args="--set image.repository=ci/open-products-catalog-service --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=ci/open-products-catalog-service/db-migration --set config.DB_URL=jdbc:postgresql://ci-writer.example.internal:5432/db_of_open_products_catalog_ci"
+          args="--set image.repository=ci/open-products-catalog-service --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=ci/open-products-catalog-service/db-migration --set config.DB_URL=jdbc:postgresql://ci-writer.example.internal:5432/db_of_open_products_catalog_ci --set networkPolicy.databaseCidrs={10.0.32.0/20}"
           helm lint "$chart" $args
           helm template ci "$chart" $args > rendered.yaml
           helm template ci "$chart" -f "$chart/values-dev.yaml" $args > /dev/null
+      - name: Rendering fails without database CIDRs
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+               --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+               --set config.DB_URL=jdbc:postgresql://ci/x > /dev/null 2> cidr.err; then
+            echo "chart rendered with an empty networkPolicy.databaseCidrs"
+            exit 1
+          fi
+          grep -q "databaseCidrs is required" cidr.err
       - name: Rendered ConfigMap has no empty or identity-provider keys
         run: |
           if grep -nE '^  OIDC_|: ""$' rendered.yaml; then

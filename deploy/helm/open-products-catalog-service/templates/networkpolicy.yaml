@@ -1,4 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- if not .Values.networkPolicy.databaseCidrs }}
+{{- fail "networkPolicy.databaseCidrs is required: the Aurora subnets' CIDRs (PostgreSQL egress is never open to any destination)" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -30,6 +33,16 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.service.managementPort }}
+    {{- if .Values.mesh.sidecarInject }}
+    # Istio sidecar: kubelet probes are rewritten to the agent on 15020 and
+    # sidecar readiness is on 15021. Probes come from the node, which no
+    # namespace selector matches, so these ports are open to the cluster.
+    - ports:
+        - protocol: TCP
+          port: 15020
+        - protocol: TCP
+          port: 15021
+    {{- end }}
   egress:
     # DNS
     - to:
@@ -41,17 +54,15 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Aurora PostgreSQL
+    # Aurora PostgreSQL, only to the cluster's subnets
     - ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.databasePort }}
-      {{- with .Values.networkPolicy.databaseCidrs }}
       to:
-        {{- range . }}
+        {{- range .Values.networkPolicy.databaseCidrs }}
         - ipBlock:
             cidr: {{ . }}
         {{- end }}
-      {{- end }}
     # OTLP traces to the platform collector
     - to:
         - namespaceSelector:
