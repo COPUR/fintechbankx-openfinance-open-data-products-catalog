@@ -38,10 +38,13 @@ The database has three login roles, each with its own Secrets Manager secret
 Every insert or update of `product` writes an append-only row to
 `product_history` (old and new values, role, `application_name`, time; V2
 migration; since V3 also `operator_arn`, the importing operator's AWS caller
-identity). The runtime and import roles cannot update or delete history rows;
-the schema owner can, so its DDL is logged (`log_statement=ddl`) and a
-disabled or dropped history trigger raises the `<env>-open-products-catalog-service-history-tamper`
-alarm (ADR-0001).
+identity). The runtime and import roles cannot update or delete history rows.
+The schema owner, which owns the table and its trigger functions, is stopped
+by the history guard (`db/bootstrap/history-guard.sql`): admin-owned event
+triggers that refuse any DDL on the history table, its two functions or its
+triggers once armed. Refusals, disarming and any DDL that reaches those
+objects (pgaudit) raise the `<env>-open-products-catalog-service-history-tamper`
+alarm (ADR-0001, section 2.3).
 
 ### 2.1 Where operator database work runs
 
@@ -127,12 +130,18 @@ production import window (step 2's `\password`, then `put-secret-value`).
    `psql "host=<writer> dbname=db_of_open_products_catalog_<env> user=open_products_admin sslmode=verify-full sslrootcert=$HOME/rds-ca/global-bundle.pem"`.
    Generate each password straight into its secret
    (`aws secretsmanager get-random-password` piped into `put-secret-value`, never
-   into a file or ticket). Aurora logs every DDL statement
-   (`log_statement=ddl`), so never write `PASSWORD '...'`: create the roles
-   without one and set it with psql's `\password`, which sends only a SCRAM
-   verifier (paste the value from the secret at the prompt):
+   into a file or ticket). Aurora logs DDL (`log_statement=ddl`) and pgaudit
+   logs role statements (`pgaudit.log=ddl,role`), so never write
+   `PASSWORD '...'`, and turn both off for this session before setting
+   passwords: create the roles without one and set it with psql's
+   `\password`, which sends only a SCRAM verifier (paste the value from the
+   secret at the prompt). With logging off for the session, not even the
+   verifier reaches the log. The same session rule applies to every later
+   rotation.
 
    ```sql
+   SET log_statement = 'none';  -- this session only; needs the admin (rds_superuser)
+   SET pgaudit.log = 'none';    -- after CREATE EXTENSION pgaudit; this session only
    CREATE ROLE open_products_catalog_owner  LOGIN;
    CREATE ROLE open_products_catalog_app    LOGIN;
    CREATE ROLE open_products_catalog_import LOGIN;
@@ -143,7 +152,16 @@ production import window (step 2's `\password`, then `put-secret-value`).
    GRANT CONNECT, CREATE    ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_owner;
    GRANT CONNECT            ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_app;
    GRANT CONNECT, TEMPORARY ON DATABASE db_of_open_products_catalog_<env> TO open_products_catalog_import;
+   RESET log_statement;
+   RESET pgaudit.log;
    ```
+
+   Run `CREATE EXTENSION IF NOT EXISTS pgaudit;` before the block above (the
+   parameter group preloads the library; the instances need one reboot after
+   the parameter group change). Then install the history guard, still as the
+   admin: `psql "<same conninfo>" -f db/bootstrap/history-guard.sql`. It is
+   installed disarmed; `SELECT fbx_history_guard.verify();` returns
+   `DISARMED` until step 3.
 
    The roles must exist before the first deploy: migration V2 grants the
    runtime and import privileges only to roles that exist when it runs (it
@@ -157,6 +175,9 @@ production import window (step 2's `\password`, then `put-secret-value`).
    container runs Flyway as the owner and exits; the service then starts with
    the runtime role and Flyway disabled. Check:
    `SELECT grantee, privilege_type FROM information_schema.role_table_grants WHERE table_schema = 'sc_of_open_products_catalog' ORDER BY 1, 2;`
+   Then the admin arms the history guard, from the operator host:
+   `SELECT fbx_history_guard.arm('<change ticket>: first deploy');` must
+   return `armed, intact`.
 4. Import the catalogue the product owner signed off, from the operator host
    (section 2.1), as the import role, signed in to AWS as yourself. The script
    records your AWS caller identity in `product_history.operator_arn` (it
@@ -173,6 +194,29 @@ production import window (step 2's `\password`, then `put-secret-value`).
 5. `OPEN_PRODUCTS_SEED_ENABLED` stays `false` outside dev and CI.
 
 Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migration-rehearsal`).
+
+### 2.3 History guard: integrity check and break-glass
+
+- **Integrity check**: `SELECT fbx_history_guard.verify();` (any role) must
+  return `armed, intact`. Anything else (`DISARMED`, `CHANGED SINCE ARMED`,
+  `EVENT TRIGGERS MISSING OR DISABLED`) is an incident. Run it after every
+  release and before each catalogue import; the rehearsal checks it, plus
+  `pg_trigger.tgenabled` and `md5(prosrc)` of the history functions.
+- **Releases**: migrations that do not touch `product_history`, its two
+  functions or its triggers run with the guard armed. A migration that does
+  is refused, the `migrate` init container fails and the rollout stops with
+  the old pods serving (`maxUnavailable: 0`).
+- **Break-glass** for such a migration, by the admin only, with a change
+  ticket: `SELECT fbx_history_guard.disarm('<ticket>');` (logs a WARNING and
+  fires the history-tamper alarm), deploy, check the history objects, then
+  `SELECT fbx_history_guard.arm('<ticket>');` to record the new state. Both
+  calls are kept in `fbx_history_guard.event` (who, when, why). The schema
+  owner can neither disarm the guard nor alter its event triggers.
+- **Log access**: the PostgreSQL log group (output
+  `postgresql_log_group_arn`) holds pgaudit lines. Read access belongs to the
+  security and DBA roles only. This stack owns no IAM policy that grants
+  reads; the platform's permission sets must scope `logs:GetLogEvents`,
+  `logs:FilterLogEvents` and `logs:StartQuery` on that ARN to those roles.
 
 ## 3. Go-live (one way)
 
