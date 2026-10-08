@@ -26,7 +26,8 @@ import org.springframework.test.web.servlet.MockMvc;
  * and loads the dev seed, Hibernate validates the entity against it, and the
  * catalogue is served from the database over HTTP.
  */
-@SpringBootTest(properties = "openproducts.catalog.seed-enabled=true")
+// snapshot-refresh=0s: rows inserted by a test must be visible to the next request.
+@SpringBootTest(properties = {"openproducts.catalog.seed-enabled=true", "openproducts.catalog.snapshot-refresh=0s"})
 @AutoConfigureMockMvc
 class OpenProductsPostgresIT {
 
@@ -60,7 +61,8 @@ class OpenProductsPostgresIT {
 
     @Test
     void postgresAdapterIsTheCatalogueAuthority() {
-        assertThat(catalogPort).isInstanceOf(JpaProductCatalogAdapter.class);
+        assertThat(catalogPort).isInstanceOf(SnapshotProductCatalog.class);
+        assertThat(((SnapshotProductCatalog) catalogPort).delegate()).isInstanceOf(JpaProductCatalogAdapter.class);
     }
 
     @Test

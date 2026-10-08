@@ -10,7 +10,7 @@ Extraction of the product catalogue from `enterprise-loan-management-system`
 | Slice | Public product catalogue read model: `GET /open-finance/v1/products` |
 | Owned data | `db_of_open_products_catalog_<env>`, schema `sc_of_open_products_catalog`: `product` |
 | Events | none yet (ADR-0001); future namespace `evt.of.products.*` |
-| Depends on | nothing at runtime besides its database (public endpoint) |
+| Depends on | its database; the gateway rate limit for `GET /open-finance/v1/products` (`429` + `Retry-After`), owned by `fintechbankx-platform-mesh-security-service-mesh` |
 
 ## 1. Data ownership split
 

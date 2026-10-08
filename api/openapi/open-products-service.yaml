@@ -56,11 +56,27 @@ paths:
               schema:
                 type: string
         '400':
-          description: Invalid request
+          description: >-
+            Invalid request: X-FAPI-Interaction-ID missing, or a type/segment
+            filter that does not match ^[A-Z0-9_-]{2,30}$ once upper-cased.
+          headers:
+            X-FAPI-Interaction-ID:
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: >-
+            Too many requests. Returned by the API gateway's rate limit, not by
+            the service; retry after the number of seconds in Retry-After.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+                minimum: 0
 components:
   parameters:
     InteractionId:
@@ -79,14 +95,26 @@ components:
       name: type
       in: query
       required: false
+      description: >-
+        Product type code, matched case-insensitively. Must match
+        ^[A-Z0-9_-]{2,30}$ once trimmed and upper-cased (2 to 30 ASCII letters,
+        digits, underscores or hyphens); anything else is rejected with 400.
+        Blank means no filter.
       schema:
         type: string
+        maxLength: 30
     Segment:
       name: segment
       in: query
       required: false
+      description: >-
+        Product segment code, matched case-insensitively. Must match
+        ^[A-Z0-9_-]{2,30}$ once trimmed and upper-cased (2 to 30 ASCII letters,
+        digits, underscores or hyphens); anything else is rejected with 400.
+        Blank means no filter.
       schema:
         type: string
+        maxLength: 30
     IfNoneMatch:
       name: If-None-Match
       in: header

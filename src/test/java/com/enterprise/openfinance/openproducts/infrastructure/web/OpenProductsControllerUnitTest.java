@@ -76,6 +76,24 @@ class OpenProductsControllerUnitTest {
     }
 
     @Test
+    void invalidFiltersAreRejectedBeforeTheCatalogueIsRead() throws Exception {
+        mockMvc.perform(get("/open-finance/v1/products?type=" + "A".repeat(31))
+                .header("X-FAPI-Interaction-ID", "it-005"))
+            .andExpect(status().isBadRequest())
+            .andExpect(header().string("X-FAPI-Interaction-ID", "it-005"))
+            .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+            .andExpect(jsonPath("$.message").value("type must match ^[A-Z0-9_-]{2,30}$"))
+            .andExpect(jsonPath("$.interactionId").value("it-005"));
+
+        mockMvc.perform(get("/open-finance/v1/products?segment=sme%27--")
+                .header("X-FAPI-Interaction-ID", "it-006"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.message").value("segment must match ^[A-Z0-9_-]{2,30}$"));
+
+        org.mockito.Mockito.verifyNoInteractions(openProductsUseCase);
+    }
+
+    @Test
     void shouldReturnBadRequestWhenInteractionHeaderMissing() throws Exception {
         mockMvc.perform(get("/open-finance/v1/products"))
             .andExpect(status().isBadRequest())

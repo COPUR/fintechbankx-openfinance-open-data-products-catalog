@@ -45,6 +45,9 @@ openproducts:
   catalog:
     # postgres (default) is the only runtime store; tests may switch to in-memory.
     store: postgres
+    # The offerable catalogue is held in memory and reloaded at most once per
+    # interval, so request rate and filters do not drive database load. 0s disables it.
+    snapshot-refresh: ${OPEN_PRODUCTS_SNAPSHOT_REFRESH:10s}
     # Sample rows from classpath:db/seed; true only in dev and CI.
     seed-enabled: ${OPEN_PRODUCTS_SEED_ENABLED:false}
   security:

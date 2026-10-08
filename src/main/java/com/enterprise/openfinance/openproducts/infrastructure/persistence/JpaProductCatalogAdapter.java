@@ -6,13 +6,12 @@ import com.enterprise.openfinance.openproducts.domain.query.ListProductsQuery;
 import com.enterprise.openfinance.openproducts.infrastructure.persistence.mapper.ProductEntityMapper;
 import java.time.Instant;
 import java.util.List;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
-/** PostgreSQL-backed catalogue: the authority for products (ADR-0001). */
-@Component
-@ConditionalOnProperty(name = "openproducts.catalog.store", havingValue = "postgres", matchIfMissing = true)
+/**
+ * PostgreSQL-backed catalogue: the authority for products (ADR-0001). Wired by
+ * ProductCatalogConfiguration behind a SnapshotProductCatalog.
+ */
 public class JpaProductCatalogAdapter implements ProductCatalogPort {
 
     private final SpringDataProductRepository repository;

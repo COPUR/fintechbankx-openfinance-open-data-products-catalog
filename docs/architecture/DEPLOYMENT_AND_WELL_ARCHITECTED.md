@@ -49,8 +49,12 @@ ingress gateway. Everything here is **Proposed** until the owning squad deploys 
 
 ## Performance efficiency
 
-- One indexed query per request (partial indexes on `ACTIVE` rows by type and
-  segment); strong ETags turn repeat reads into `304` without a body.
+- Requests are served from an in-process snapshot of the offerable catalogue,
+  reloaded with one indexed query at most every 10 s per pod
+  (`OPEN_PRODUCTS_SNAPSHOT_REFRESH`); strong ETags turn repeat reads into `304`
+  without a body. Filters outside `^[A-Z0-9_-]{2,30}$` are rejected with `400`
+  before the catalogue is read. Per-client rate limiting (`429`) is done by the
+  API gateway (service-mesh repository).
 - Virtual threads for request handling; Hikari pool of 10 per pod.
 - HPA on CPU (65 %) and memory, 2 to 8 replicas.
 

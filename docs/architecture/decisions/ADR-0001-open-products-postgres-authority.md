@@ -40,20 +40,28 @@ So there is **no monolith catalogue data to backfill**.
    write or import use case exists in the service, add the outbox (shared brief,
    item 9) and publish compacted fact topics such as `evt.of.products.published.v1`
    keyed by product id, then write the AsyncAPI spec.
-4. Caching is done over HTTP: a strong `ETag` over the product content with
-   `If-None-Match` -> `304`, and `Cache-Control: public, max-age=60`. No Redis
-   and no in-process cache port: the data is small, changes rarely, and the
-   gateway/CDN and clients can cache it. The monolith's TTL cache port is
-   deliberately not ported.
+4. Caching: a strong `ETag` over the product content with `If-None-Match` ->
+   `304`, and `Cache-Control: no-cache`, because every response echoes the
+   caller's `X-FAPI-Interaction-ID` and must not be reused by a shared cache
+   without revalidation. `Links.Self` is a relative path built from the filters.
+   Inside each pod, `SnapshotProductCatalog` holds the offerable catalogue in
+   memory and reloads it at most once per `OPEN_PRODUCTS_SNAPSHOT_REFRESH`
+   (default 10 s), so request rate and filter values do not drive database
+   load and a revalidation costs no database round trip. Filters are validated
+   (`^[A-Z0-9_-]{2,30}$` once upper-cased, else `400`) before the catalogue is
+   read. No Redis: the data is small and changes rarely. The monolith's TTL
+   cache port is not ported.
 
 ## Consequences
 
 - Every replica serves the same catalogue; a catalogue change is visible within
-  60 seconds (the max-age) without redeploying.
+  one snapshot interval (10 s by default) without redeploying.
 - Products are withdrawn by status (`WITHDRAWN`) or `effective_to`, never deleted,
   which keeps an audit trail and lets the import stay idempotent.
-- The service's database load is one indexed query per cache miss; Aurora
-  Serverless v2 can run at a low minimum capacity.
+- The service's database load is at most one indexed query per pod per
+  snapshot interval; Aurora Serverless v2 can run at a low minimum capacity.
+- Request-rate limiting (`429` with `Retry-After`) is the API gateway's job and
+  is a dependency on the service-mesh repository, not on this service.
 - Until the outbox exists, other services cannot subscribe to catalogue changes;
   they call the API (and can use the ETag).
 
