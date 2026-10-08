@@ -20,7 +20,7 @@ Extraction of the product catalogue from `enterprise-loan-management-system`
 | `productcatalog` in-memory TTL cache | dropped | replaced by HTTP caching (ETag, Cache-Control) |
 | Product SQL tables | none exist | no monolith migration creates one, so there is nothing to backfill |
 | `sc_of_open_products_catalog.product` | this service | Flyway `V1__create_product_catalogue.sql` |
-| `sc_of_open_products_catalog.product_history` | this service | Flyway `V2__product_history_and_roles.sql` (append-only audit trail) |
+| `sc_of_open_products_catalog.product_history` | this service | Flyway `V2__product_history_and_roles.sql` (append-only audit trail), `V3` (operator identity), `V4` (written only by its trigger; product deletes recorded) |
 
 The service never reads monolith tables; nothing else reads `sc_of_open_products_catalog`.
 
@@ -201,9 +201,14 @@ Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migratio
   return `armed, intact`. Anything else (`DISARMED`, `CHANGED SINCE ARMED`,
   `EVENT TRIGGERS MISSING OR DISABLED`) is an incident. Run it after every
   release and before each catalogue import; the rehearsal checks it, plus
-  `pg_trigger.tgenabled` and `md5(prosrc)` of the history functions.
-- **Releases**: migrations that do not touch `product_history`, its two
-  functions or its triggers run with the guard armed. A migration that does
+  `pg_trigger.tgenabled` and `md5(prosrc)` of the history functions. It is
+  **not scheduled yet**: a scheduled check (a Kubernetes CronJob or an
+  application metric with an alert) is a go-live item owned by the Open Data
+  Squad (section 3).
+- **Releases**: migrations that do not touch `product_history`, its three
+  functions (`product_history_record`, `product_history_append_only`,
+  `product_history_insert_guard`) or any trigger on `product` or
+  `product_history` run with the guard armed. A migration that does
   is refused, the `migrate` init container fails and the rollout stops with
   the old pods serving (`maxUnavailable: 0`).
 - **Break-glass** for such a migration, by the admin only, with a change
@@ -211,7 +216,9 @@ Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migratio
   fires the history-tamper alarm), deploy, check the history objects, then
   `SELECT fbx_history_guard.arm('<ticket>');` to record the new state. Both
   calls are kept in `fbx_history_guard.event` (who, when, why). The schema
-  owner can neither disarm the guard nor alter its event triggers.
+  owner can neither disarm the guard nor alter its event triggers. An
+  environment armed before V4 applies V4 this way and re-arms, because the
+  guard's fingerprint now also covers the V4 trigger and function.
 - **Log access**: the PostgreSQL log group (output
   `postgresql_log_group_arn`) holds pgaudit lines. Read access belongs to the
   security and DBA roles only. This stack owns no IAM policy that grants
@@ -240,6 +247,9 @@ service, not returning traffic to the monolith.
 - The operator host or in-VPC CI agent, with its security group in
   `operator_security_group_ids` (section 2.1).
 - The DBA bootstrap in section 2 (three roles) done before the first deploy.
+- A scheduled history-guard integrity check (`fbx_history_guard.verify()` must
+  return `armed, intact`), as a Kubernetes CronJob or an application metric
+  with an alert. Owner: Open Data Squad. Not built yet.
 
 **Steps**
 
@@ -299,5 +309,6 @@ service, not returning traffic to the monolith.
 - [x] Idempotent catalogue import rehearsed in CI
 - [x] Container image, Helm chart, Terraform checked in the Deployability workflow
 - [ ] Real catalogue CSV signed off by the product owner
+- [ ] Scheduled history-guard integrity check (CronJob or app metric, alerting; owner: Open Data Squad)
 - [ ] Gateway route switched (platform)
 - [ ] Monolith `productcatalog` controller removed (enterprise-loan-management-system)

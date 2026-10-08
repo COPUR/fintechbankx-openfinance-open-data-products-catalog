@@ -32,7 +32,7 @@ So there is **no monolith catalogue data to backfill**.
    The published offer lives in PostgreSQL (`db_of_open_products_catalog_<env>`,
    schema `sc_of_open_products_catalog`, table `product`). Flyway owns the
    schema (`V1__create_product_catalogue.sql`, `V2__product_history_and_roles.sql`,
-   `V3__history_operator_identity.sql`);
+   `V3__history_operator_identity.sql`, `V4__history_insert_guard_and_deletes.sql`);
    the service reads it through `JpaProductCatalogAdapter`, which implements
    the domain out-port `ProductCatalogPort`. Hibernate validates the mapping at startup.
 2. Store class: **system of record** for the published offer (not a cache or
@@ -85,16 +85,22 @@ So there is **no monolith catalogue data to backfill**.
   - The runtime and import roles have no privilege on `product_history`;
     `UPDATE`, `DELETE` and `TRUNCATE` of it are rejected by triggers, also
     for the schema owner.
+  - Only the history trigger on `product` writes `product_history` (V4): a
+    direct insert is refused for every role, including the owner and a
+    superuser (`pg_trigger_depth()`). Deleting a product writes a `DELETE`
+    row with the old values (V4); tested with a delete by the owner.
   - The schema owner's DDL on the history is **prevented** while the history
     guard (`db/bootstrap/history-guard.sql`, admin-owned event triggers
-    installed by the DBA bootstrap, not by Flyway) is armed. Sixteen probes
+    installed by the DBA bootstrap, not by Flyway) is armed. Twenty-one probes
     run as the owner are refused, including the review's three (replacing
     `product_history_append_only` to `RETURN OLD`, `DISABLE TRIGGER` built by
     concatenation inside `DO`/`EXECUTE`, spacing and case variants), and
     disabling triggers (`USER`, `ALL`, replica-only), dropping triggers,
     functions, the table or a column, renaming it, `SECURITY INVOKER`,
     replacing the recording function, a rule or a new trigger on the
-    history. Afterwards the three triggers are enabled with unchanged
+    history; and, since V4, a new trigger on `product`, dropping or
+    replacing the insert guard and dropping or disabling the delete
+    trigger. Afterwards the five history triggers are enabled with unchanged
     function bodies (`tgenabled`, `md5(prosrc)`) and
     `fbx_history_guard.verify()` returns `armed, intact`. Other owner DDL
     still runs.
@@ -107,8 +113,8 @@ So there is **no monolith catalogue data to backfill**.
   naming the history objects and rejected history changes.
 - Not covered: the admin (rds_superuser) can disarm the guard or drop its
   event triggers; that is the break-glass path, alarmed but not prevented.
-  The schema owner can still `INSERT` rows into `product_history` directly
-  and `DELETE` products (neither is DDL; a delete writes no history row).
+  The schema owner can still change `product` directly (every change is
+  recorded with its role) and read the history.
   The owner credential lives only in the `migrate` init container. Creating
   the event triggers as `rds_superuser` on Aurora is documented AWS
   behaviour but has not been run here.
