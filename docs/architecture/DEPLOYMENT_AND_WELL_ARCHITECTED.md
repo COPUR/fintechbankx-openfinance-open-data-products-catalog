@@ -38,7 +38,7 @@ ingress gateway. Everything here is **Proposed** until the owning squad deploys 
 - Responses contain catalogue data only (no customer data); the table is
   classified `public`, while the database itself stays private.
 - Pod: non-root, read-only root filesystem, all capabilities dropped,
-  RuntimeDefault seccomp; Istio sidecar for mTLS; NetworkPolicy allows ingress
+  RuntimeDefault seccomp; Istio sidecar for mTLS; the mesh repo owns the namespace NetworkPolicy, and the chart's own one (`networkPolicy.enabled`, off by default) allows ingress
   from the gateway (8080), Prometheus (8081) and to the sidecar's probe ports
   (15020/15021), and egress to DNS, PostgreSQL (only `networkPolicy.databaseCidrs`;
   the chart refuses to render without them), OTLP and istiod.

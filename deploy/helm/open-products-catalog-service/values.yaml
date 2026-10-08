@@ -72,7 +72,9 @@ externalSecret:
   refreshInterval: 1h
 
 networkPolicy:
-  enabled: true
+  # Off by default: the mesh repo owns NetworkPolicy for the namespace
+  # (cicd-templates 1dd1138). Turn on only where the mesh policy is absent.
+  enabled: false
   # Callers: the Istio ingress gateway; Prometheus scrapes the management port.
   gatewayNamespace: istio-ingress
   observabilityNamespace: observability
