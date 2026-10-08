@@ -61,6 +61,29 @@ Bu repository, FinTechBankX DDD/EDA dönüşümünde **svc-of-open-products-cata
 - Katkı süreci için `CONTRIBUTING.md` ve squad runbook'ları izlenmelidir.
 - PR'larda mimari kararlar ADR veya backlog referansı ile ilişkilendirilmelidir.
 
+## Run and deploy
+
+Service `svc-of-open-products-catalog` (artifact `open-products-catalog-service`) serves the public
+product catalogue from its own PostgreSQL database
+([ADR-0001](docs/architecture/decisions/ADR-0001-open-products-postgres-authority.md)).
+
+| Task | Command |
+|---|---|
+| Unit and web tests (no database) | `./gradlew test` |
+| Full gate incl. PostgreSQL tests and coverage | `TEST_DB_URL=jdbc:postgresql://localhost:5432/<db> TEST_DB_USERNAME=... TEST_DB_PASSWORD=... ./gradlew check` |
+| Run locally with sample data | `DB_URL=jdbc:postgresql://localhost:5432/<db> DB_USERNAME=... SPRING_DATASOURCE_PASSWORD=... OPEN_PRODUCTS_SEED_ENABLED=true ./gradlew bootRun` |
+| Load or update the catalogue | `db/import/import-products.sh "<conninfo>" products.csv` (format: `db/import/products.example.csv`) |
+| Rehearse migration, seed and import | `PGHOST=... PGUSER=... PGPASSWORD=... scripts/migration/verify-migration.sh` |
+| Container image | `docker build -t open-products-catalog-service:dev .` |
+| Kubernetes | `helm upgrade --install open-products-catalog-service deploy/helm/open-products-catalog-service -n open-finance -f deploy/helm/open-products-catalog-service/values-<env>.yaml --set image.repository=... --set image.tag=<sha> --set externalSecret.remoteSecretName=<env>/open-products-catalog-service/db-app` |
+| AWS resources | `deploy/terraform` (`terraform init -backend-config=environments/<env>.backend.hcl`, then plan with `environments/<env>.tfvars`) |
+
+API port 8080, management port 8081 (`/actuator/health/{liveness,readiness}`, `/actuator/prometheus`).
+Runtime settings come from the environment (`DB_URL`, `DB_USERNAME`, `SPRING_DATASOURCE_PASSWORD`,
+`OIDC_ISSUER_URI`, `OIDC_JWK_SET_URI`, `OIDC_AUDIENCE`, `OPEN_PRODUCTS_SEED_ENABLED`, `TRACING_ENABLED`).
+See [Deployment and Well-Architected notes](docs/architecture/DEPLOYMENT_AND_WELL_ARCHITECTED.md) and the
+[extraction runbook](docs/migration/RUNBOOK-EXTRACT-of-open-products-catalog.md).
+
 ## Cell-Based Architecture
 
 This repository participates in the FinTechBankX cell-based resilience program.
