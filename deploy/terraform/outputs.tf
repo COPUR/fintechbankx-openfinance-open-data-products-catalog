@@ -18,9 +18,9 @@ output "app_db_secret_name" {
   value       = aws_secretsmanager_secret.app_database.name
 }
 
-output "migrate_db_secret_name" {
-  description = "Helm value externalSecret.migrateRemoteSecretName."
-  value       = aws_secretsmanager_secret.migrate_database.name
+output "migration_db_secret_name" {
+  description = "Helm value externalSecret.migrationRemoteSecretName."
+  value       = aws_secretsmanager_secret.migration_database.name
 }
 
 output "import_db_secret_name" {

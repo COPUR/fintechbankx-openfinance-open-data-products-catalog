@@ -31,7 +31,7 @@ The database has three login roles, each with its own Secrets Manager secret
 
 | Role | Secret | Used by | May |
 |---|---|---|---|
-| `open_products_catalog_owner` | `<env>/open-products-catalog-service/db-migrate` | Flyway, in the pod's `migrate` init container only | own the schema, run migrations |
+| `open_products_catalog_owner` | `<env>/open-products-catalog-service/db-migration` | Flyway, in the pod's `migrate` init container only | own the schema, run migrations |
 | `open_products_catalog_app` | `<env>/open-products-catalog-service/db-app` | the serving container | `SELECT` on `product` (nothing on `product_history`) |
 | `open_products_catalog_import` | `<env>/open-products-catalog-service/db-import` | operators running `import-products.sh` | `SELECT`, `INSERT`, `UPDATE` on `product`; no `DELETE` or `TRUNCATE` |
 
@@ -40,7 +40,7 @@ Every insert or update of `product` writes an append-only row to
 migration). No role can update or delete history rows.
 
 1. Terraform creates the cluster and the three empty secrets (outputs
-   `app_db_secret_name`, `migrate_db_secret_name`, `import_db_secret_name`).
+   `app_db_secret_name`, `migration_db_secret_name`, `import_db_secret_name`).
 2. DBA bootstrap, once per environment, connected with the RDS-managed admin
    credential (output `master_user_secret_arn`) to `db_of_open_products_catalog_<env>`.
    Generate each password into the secret directly (never into a file or ticket):
@@ -60,7 +60,7 @@ migration). No role can update or delete history rows.
    logs a NOTICE otherwise). If a role was created late, re-run the two grants
    from `V2__product_history_and_roles.sql` as the owner.
 3. Deploy the chart with `externalSecret.remoteSecretName` (db-app) and
-   `externalSecret.migrateRemoteSecretName` (db-migrate). The `migrate` init
+   `externalSecret.migrationRemoteSecretName` (db-migration). The `migrate` init
    container runs Flyway as the owner and exits; the service then starts with
    the runtime role and Flyway disabled. Check:
    `SELECT grantee, privilege_type FROM information_schema.role_table_grants WHERE table_schema = 'sc_of_open_products_catalog' ORDER BY 1, 2;`
@@ -87,7 +87,7 @@ service, not returning traffic to the monolith.
   (`fintechbankx-platform-mesh-security-service-mesh`, commit `5e756f0`),
   merged and applied in the target environment.
 - `ClusterSecretStore` `aws-secrets-manager` (platform External Secrets),
-  able to read `<env>/open-products-catalog-service/db-app` and `db-migrate`
+  able to read `<env>/open-products-catalog-service/db-app` and `db-migration`
   and decrypt with the service's tagged KMS key.
 - The DBA bootstrap in section 2 (three roles) done before the first deploy.
 

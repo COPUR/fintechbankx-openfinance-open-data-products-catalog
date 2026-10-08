@@ -65,10 +65,10 @@ externalSecret:
   # Secrets Manager secret <env>/open-products-catalog-service/db-app
   # (deploy/terraform output app_db_secret_name): runtime role, SELECT only.
   remoteSecretName: ""
-  # Secrets Manager secret <env>/open-products-catalog-service/db-migrate
-  # (deploy/terraform output migrate_db_secret_name): schema owner, used only
+  # Secrets Manager secret <env>/open-products-catalog-service/db-migration
+  # (deploy/terraform output migration_db_secret_name): schema owner, used only
   # by the migrate init container that runs Flyway before the service starts.
-  migrateRemoteSecretName: ""
+  migrationRemoteSecretName: ""
   refreshInterval: 1h
 
 networkPolicy:

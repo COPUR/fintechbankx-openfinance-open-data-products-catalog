@@ -30,7 +30,7 @@ spec:
         # Restarts pods when the secret mapping changes, and on the next
         # upgrade after a credential rotation (lookup reads the synced Secrets'
         # data; it is empty under helm template/lint).
-        checksum/secret: {{ printf "%s%v%v" (include (print $.Template.BasePath "/externalsecret.yaml") .) (lookup "v1" "Secret" (include "products.namespace" .) (include "products.dbSecretName" .)).data (lookup "v1" "Secret" (include "products.namespace" .) (include "products.migrateSecretName" .)).data | sha256sum }}
+        checksum/secret: {{ printf "%s%v%v" (include (print $.Template.BasePath "/externalsecret.yaml") .) (lookup "v1" "Secret" (include "products.namespace" .) (include "products.dbSecretName" .)).data (lookup "v1" "Secret" (include "products.namespace" .) (include "products.migrationSecretName" .)).data | sha256sum }}
         {{- if .Values.mesh.sidecarInject }}
         # Aurora is outside the mesh (PostgreSQL TLS end to end); without this the
         # migrate init container, which runs before the sidecar, cannot connect.
@@ -73,7 +73,7 @@ spec:
             - configMapRef:
                 name: {{ include "products.name" . }}
             - secretRef:
-                name: {{ include "products.migrateSecretName" . }}
+                name: {{ include "products.migrationSecretName" . }}
           env:
             - name: OPEN_PRODUCTS_MIGRATE_ONLY
               value: "true"
@@ -83,12 +83,12 @@ spec:
             - name: DB_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "products.migrateSecretName" . }}
+                  name: {{ include "products.migrationSecretName" . }}
                   key: FLYWAY_USER
             - name: SPRING_DATASOURCE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "products.migrateSecretName" . }}
+                  name: {{ include "products.migrationSecretName" . }}
                   key: FLYWAY_PASSWORD
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

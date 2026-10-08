@@ -142,7 +142,7 @@ resource "aws_rds_cluster_instance" "database" {
 # contract <env>/<service-slug>/<name>; all three use the tagged KMS key that
 # External Secrets may decrypt.
 #   db-app      open_products_catalog_app     runtime: SELECT on product
-#   db-migrate  open_products_catalog_owner   schema owner: Flyway (migrate init container)
+#   db-migration  open_products_catalog_owner   schema owner: Flyway (migrate init container)
 #   db-import   open_products_catalog_import  import-products.sh: SELECT, INSERT, UPDATE on product
 resource "aws_secretsmanager_secret" "app_database" {
   name                    = "${var.environment}/${local.service_slug}/db-app"
@@ -151,8 +151,13 @@ resource "aws_secretsmanager_secret" "app_database" {
   recovery_window_in_days = 7
 }
 
-resource "aws_secretsmanager_secret" "migrate_database" {
-  name                    = "${var.environment}/${local.service_slug}/db-migrate"
+# Name per the platform contract's database-roles pattern
+# (<env>/<service-slug>/db-migration). The aurora-postgresql module can create
+# this container (terraform-modules 4ed9368, not on main yet), but this stack
+# builds its own cluster and microservice-base@main does not create it, so it
+# is owned here. Switch to the module output when the stack moves to it.
+resource "aws_secretsmanager_secret" "migration_database" {
+  name                    = "${var.environment}/${local.service_slug}/db-migration"
   description             = "Schema owner credential for ${local.service_id} Flyway migrations"
   kms_key_id              = aws_kms_key.database.arn
   recovery_window_in_days = 7

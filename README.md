@@ -75,7 +75,7 @@ product catalogue from its own PostgreSQL database
 | Load or update the catalogue | `IMPORT_OPERATOR=<id> db/import/import-products.sh "<conninfo as open_products_catalog_import>" products.csv` (format: `db/import/products.example.csv`) |
 | Rehearse migration, seed and import | `PGHOST=... PGUSER=... PGPASSWORD=... scripts/migration/verify-migration.sh` |
 | Container image | `docker build -t open-products-catalog-service:dev .` |
-| Kubernetes | `helm upgrade --install open-products-catalog-service deploy/helm/open-products-catalog-service -n open-finance -f deploy/helm/open-products-catalog-service/values-<env>.yaml --set image.repository=... --set image.tag=<sha> --set externalSecret.remoteSecretName=<env>/open-products-catalog-service/db-app --set externalSecret.migrateRemoteSecretName=<env>/open-products-catalog-service/db-migrate` |
+| Kubernetes | `helm upgrade --install open-products-catalog-service deploy/helm/open-products-catalog-service -n open-finance -f deploy/helm/open-products-catalog-service/values-<env>.yaml --set image.repository=... --set image.tag=<sha> --set externalSecret.remoteSecretName=<env>/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=<env>/open-products-catalog-service/db-migration` |
 | AWS resources | `deploy/terraform` (`terraform init -backend-config=environments/<env>.backend.hcl`, then plan with `environments/<env>.tfvars`) |
 
 API port 8080, management port 8081 (`/actuator/health/{liveness,readiness}`, `/actuator/prometheus`).

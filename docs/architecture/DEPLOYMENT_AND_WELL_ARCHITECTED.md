@@ -43,9 +43,9 @@ ingress gateway. Everything here is **Proposed** until the owning squad deploys 
   and istiod.
 - Credentials: one role per duty, each in Secrets Manager under
   `<env>/open-products-catalog-service/` (KMS-encrypted): `db-app` (runtime,
-  `SELECT` on `product`), `db-migrate` (schema owner, used only by the
+  `SELECT` on `product`), `db-migration` (schema owner, used only by the
   `migrate` init container) and `db-import` (operators; no `DELETE`). External
-  Secrets (`aws-secrets-manager`) syncs `db-app` and `db-migrate`; the pod's
+  Secrets (`aws-secrets-manager`) syncs `db-app` and `db-migration`; the pod's
   IRSA role reads only its SSM parameters. Every catalogue change lands in the
   append-only `product_history`. Aurora enforces TLS (`rds.force_ssl`).
 

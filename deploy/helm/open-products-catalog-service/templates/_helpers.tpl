@@ -24,6 +24,6 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{ include "products.name" . }}-db
 {{- end -}}
 
-{{- define "products.migrateSecretName" -}}
-{{ include "products.name" . }}-db-migrate
+{{- define "products.migrationSecretName" -}}
+{{ include "products.name" . }}-db-migration
 {{- end -}}
