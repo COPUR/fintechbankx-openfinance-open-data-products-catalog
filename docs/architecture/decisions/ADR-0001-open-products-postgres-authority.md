@@ -31,7 +31,8 @@ So there is **no monolith catalogue data to backfill**.
    owner signs off**; that file is the only input, loaded by the import below.
    The published offer lives in PostgreSQL (`db_of_open_products_catalog_<env>`,
    schema `sc_of_open_products_catalog`, table `product`). Flyway owns the
-   schema (`V1__create_product_catalogue.sql`, `V2__product_history_and_roles.sql`);
+   schema (`V1__create_product_catalogue.sql`, `V2__product_history_and_roles.sql`,
+   `V3__history_operator_identity.sql`);
    the service reads it through `JpaProductCatalogAdapter`, which implements
    the domain out-port `ProductCatalogPort`. Hibernate validates the mapping at startup.
 2. Store class: **system of record** for the published offer (not a cache or
@@ -76,9 +77,28 @@ So there is **no monolith catalogue data to backfill**.
   deleted (the import role has no `DELETE`), which lets the import stay
   idempotent. The audit trail is `product_history` (V2): an `AFTER INSERT OR
   UPDATE` trigger writes the old and new row, the role, `application_name`
-  (the import sets it to `import-products/<operator>`) and the time; the table
-  is append-only (triggers reject `UPDATE`, `DELETE` and `TRUNCATE`, and no
-  role has privileges on it).
+  (the import sets it to `import-products/<operator>`), the time and, since
+  V3, `operator_arn`, the importing operator's AWS caller identity.
+- The history is **tamper-evident against the runtime and import roles
+  only**: neither has any privilege on `product_history`, and its triggers
+  reject `UPDATE`, `DELETE` and `TRUNCATE`. The **schema owner** is not
+  stopped: it owns the table and can disable or drop those triggers, or
+  replace the history function. That is **detected, not prevented**: Aurora
+  logs every DDL statement (`log_statement=ddl` in the cluster parameter
+  group, `deploy/terraform/main.tf`), the PostgreSQL log is exported to
+  CloudWatch, and the `history-tamper` metric filter and alarm fire on a
+  disabled or dropped trigger, a replaced `product_history_record` or a
+  rejected history change. The filter is case-sensitive (upper- and
+  lower-case DDL only); `pgaudit` with object auditing on `product_history`
+  would close that gap and is the next step if the owner credential's
+  exposure grows. The owner credential lives only in the `migrate` init
+  container.
+- Import attribution: `import-products.sh` takes the operator's identity from
+  `aws sts get-caller-identity` (the same credentials that fetched the
+  `db-import` secret) and the database rejects import-role changes without
+  one. CloudTrail logs every `GetSecretValue` on `db-import` with the IAM
+  principal and time, so a history row can be matched with the fetch
+  (runbook section 2.1).
 - Three database roles: the schema owner runs Flyway only (in the pod's
   migrate init container), the runtime role can only `SELECT` from `product`,
   and the import role can `SELECT`, `INSERT` and `UPDATE` it.
@@ -89,6 +109,31 @@ So there is **no monolith catalogue data to backfill**.
   and `x-fbx-rate-limited: true`), a dependency on the service-mesh repository.
 - Until the outbox exists, other services cannot subscribe to catalogue changes;
   they call the API (and can use the ETag).
+
+## Residual risk: one shared import credential
+
+The import role `open_products_catalog_import` has one password in
+`<env>/open-products-catalog-service/db-import`, which every operator
+fetches. `operator_arn` in the history is what the script read from STS;
+anyone who fetched the password can connect with plain `psql` and set any
+ARN-shaped value. What bounds this:
+
+- only principals with `GetSecretValue` on the secret and `kms:Decrypt` on
+  the database key can obtain it, and CloudTrail names each of them;
+- the import role cannot delete products, touch the history or change the
+  schema, and every change it makes is in the history;
+- the database is reachable only from the workload and the operator hosts in
+  `operator_security_group_ids` (no public path);
+- the password is rotated after each production import window (runbook).
+
+Not chosen for now: per-operator database logins with IAM database
+authentication (the cluster already has `iam_database_authentication_enabled`).
+That would make `session_user` the operator and remove the shared password,
+but needs one database role per operator and per-operator `rds-db:connect`
+grants in the operators' IAM permission sets, which this repository does not
+own. Revisit when the platform's operator access model provides them; the
+import script would then `SET ROLE open_products_catalog_import` and the
+history's `login_role` already records the login.
 
 ## Reversibility
 
@@ -110,3 +155,6 @@ So there is **no monolith catalogue data to backfill**.
   upstream and this service only holds what was published.
 - For the owning squad: schedule a point-in-time restore rehearsal of the
   Aurora cluster and record its result as recovery evidence.
+- For the platform: who provides the in-VPC operator host or CI agent per
+  environment, and can operator permission sets carry per-operator
+  `rds-db:connect` (to replace the shared import password)?
