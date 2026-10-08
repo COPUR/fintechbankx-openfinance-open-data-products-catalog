@@ -2,6 +2,11 @@
 {{- if not .Values.networkPolicy.databaseCidrs }}
 {{- fail "networkPolicy.databaseCidrs is required: the Aurora subnets' CIDRs (PostgreSQL egress is never open to any destination)" }}
 {{- end }}
+{{- range .Values.networkPolicy.databaseCidrs }}
+{{- if hasSuffix "/0" (toString . | trim) }}
+{{- fail (printf "networkPolicy.databaseCidrs entry %q must not end in /0: list the Aurora subnets' CIDRs only" (toString .)) }}
+{{- end }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

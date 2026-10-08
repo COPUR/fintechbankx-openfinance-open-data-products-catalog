@@ -81,7 +81,8 @@ networkPolicy:
   # Egress beyond DNS: the Aurora endpoint, OTLP and istiod. No identity
   # provider: no endpoint validates tokens.
   databasePort: 5432
-  # Required: VPC subnets of the Aurora cluster, e.g. ["10.0.32.0/20"]; rendering fails when empty.
+  # Required: VPC subnets of the Aurora cluster, e.g. ["10.0.32.0/20"]; rendering
+  # fails when empty or when an entry ends in /0.
   databaseCidrs: []
   otlpPort: 4318
 
