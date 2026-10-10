@@ -55,6 +55,16 @@ public final class PostgresTestDatabase {
         registry.add("spring.datasource.password", () -> env(env, "TEST_DB_PASSWORD", "open_products_test"));
     }
 
+    /** The same database as command-line arguments, for a second SpringApplication started by a test. */
+    public static String[] springArguments() {
+        Map<String, String> env = System.getenv();
+        return new String[] {
+            "--spring.datasource.url=" + env.get("TEST_DB_URL"),
+            "--spring.datasource.username=" + env(env, "TEST_DB_USERNAME", "open_products_test"),
+            "--spring.datasource.password=" + env(env, "TEST_DB_PASSWORD", "open_products_test"),
+        };
+    }
+
     private static String env(Map<String, String> env, String name, String fallback) {
         String value = env.get(name);
         return value == null || value.isBlank() ? fallback : value;

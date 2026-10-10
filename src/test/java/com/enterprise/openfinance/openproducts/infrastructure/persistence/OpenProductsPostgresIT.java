@@ -278,6 +278,44 @@ class OpenProductsPostgresIT {
         }
     }
 
+    /**
+     * The scheduled check and the release gate (Helm CronJob and pre-upgrade
+     * hook) start the service with OPEN_PRODUCTS_HISTORY_GUARD_CHECK=true: it
+     * runs fbx_history_guard.verify() and exits, non-zero unless the answer is
+     * 'armed, intact'. Proved here against the real guard: disarmed, armed,
+     * and changed since armed (a new member of the history writer).
+     */
+    @Test
+    void historyGuardCheckFailsUnlessTheGuardIsArmedAndIntact() {
+        HistoryGuardBootstrap.install(jdbc, SCHEMA);
+        assertThat(jdbc.queryForObject("SELECT fbx_history_guard.verify()", String.class)).isEqualTo("DISARMED");
+        assertThatThrownBy(this::runHistoryGuardCheck)
+            .hasStackTraceContaining("history guard check failed: verify() answered 'DISARMED'");
+
+        String user = jdbc.queryForObject("SELECT current_user", String.class);
+        withArmedGuard(() -> {
+            assertThat(runHistoryGuardCheck()).as("the check run exits once verify() is 'armed, intact'").isFalse();
+            jdbc.execute("GRANT open_products_catalog_history_writer TO " + user + " WITH INHERIT FALSE, SET TRUE");
+            try {
+                assertThatThrownBy(this::runHistoryGuardCheck)
+                    .hasStackTraceContaining("history guard check failed: verify() answered 'CHANGED SINCE ARMED'");
+            } finally {
+                jdbc.execute("REVOKE open_products_catalog_history_writer FROM " + user);
+            }
+        });
+    }
+
+    /** Starts the service in check mode, as the CronJob does; returns whether its context is still running. */
+    private boolean runHistoryGuardCheck() {
+        String[] arguments = java.util.stream.Stream.concat(java.util.Arrays.stream(PostgresTestDatabase.springArguments()),
+            java.util.stream.Stream.of("--openproducts.history-guard-check=true", "--spring.flyway.enabled=false"))
+            .toArray(String[]::new);
+        try (var context = new org.springframework.boot.builder.SpringApplicationBuilder(com.enterprise.openfinance.openproducts.Application.class)
+                .web(org.springframework.boot.WebApplicationType.NONE).run(arguments)) {
+            return context.isActive();
+        }
+    }
+
     /** Installs the history guard from db/bootstrap, arms it, runs the body and always disarms. */
     private void withArmedGuard(Runnable body) {
         HistoryGuardBootstrap.install(jdbc, SCHEMA);
