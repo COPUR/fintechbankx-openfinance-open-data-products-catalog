@@ -1,0 +1,130 @@
+# Defaults are production-shaped (multi-replica, spread across zones).
+# Override per environment with values-<env>.yaml.
+
+# Platform contract: every svc-of-* service runs in the open-finance namespace.
+namespace: open-finance
+
+image:
+  repository: ""   # e.g. <account>.dkr.ecr.<region>.amazonaws.com/fintechbankx/open-products-catalog-service
+  tag: ""          # immutable tag (git SHA); never "latest"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+serviceAccount:
+  name: open-products-catalog-service
+  # IAM role from deploy/terraform output workload_role_arn (IRSA).
+  roleArn: ""
+
+podLabels:
+  app: open-products-catalog-service
+  app.kubernetes.io/part-of: fintechbankx-open-finance
+  fintechbankx.io/service-id: svc-of-open-products-catalog
+
+# Istio sidecar injection (mesh-wide STRICT mTLS is owned by the platform).
+mesh:
+  sidecarInject: true
+
+service:
+  port: 8080
+  managementPort: 8081
+
+# Read-only, cache-friendly catalogue: small requests, scales on CPU.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 768Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 65
+
+podDisruptionBudget:
+  minAvailable: 1
+
+# Non-secret runtime settings, rendered into a ConfigMap.
+config:
+  # deploy/terraform output jdbc_url:
+  # jdbc:postgresql://<aurora-writer-endpoint>:5432/db_of_open_products_catalog_<env>?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem
+  # Rendering fails unless it verifies the server certificate against databaseCaBundle.
+  DB_URL: ""
+  DB_USERNAME: open_products_catalog_app
+  DB_POOL_MAX: "10"
+  OPEN_PRODUCTS_SEED_ENABLED: "false"
+  TRACING_ENABLED: "true"
+  TRACING_SAMPLING_PROBABILITY: "0.1"
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4318/v1/traces
+
+# Amazon RDS CA bundle for PostgreSQL TLS (sslmode=verify-full). The platform's
+# trust-manager publishes ConfigMap rds-ca-bundle (key global-bundle.pem) into
+# every service namespace; the chart mounts it read-only into the migrate init
+# container and the service container, and config.DB_URL must point
+# sslrootcert at <mountPath>/<key>.
+databaseCaBundle:
+  configMapName: rds-ca-bundle
+  key: global-bundle.pem
+  mountPath: /etc/fintechbankx/rds-ca
+
+# Extra JDBC URL parameters allowed in config.DB_URL besides sslmode and
+# sslrootcert (exact names, e.g. ["connectTimeout"]). ssl* and service are
+# refused even when listed.
+databaseUrlAllowedParams: []
+
+# Credentials synced from AWS Secrets Manager by External Secrets Operator.
+externalSecret:
+  enabled: true
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  # Secrets Manager secret <env>/open-products-catalog-service/db-app
+  # (deploy/terraform output app_db_secret_name): runtime role, SELECT only.
+  remoteSecretName: ""
+  # Secrets Manager secret <env>/open-products-catalog-service/db-migration
+  # (deploy/terraform output migration_db_secret_name): schema owner, used only
+  # by the migrate init container that runs Flyway before the service starts.
+  migrationRemoteSecretName: ""
+  refreshInterval: 1h
+
+# History guard integrity check (runbook section 2.3), a release blocker. The
+# service in check mode runs fbx_history_guard.verify() as the runtime role and
+# exits non-zero unless it answers 'armed, intact':
+# - a CronJob on this schedule; a failed Job raises the platform's job-failure
+#   alert for the namespace;
+# - a pre-upgrade hook Job (the release gate): helm upgrade fails and nothing is
+#   applied. Not pre-install: the guard is armed after the first install.
+historyGuardCheck:
+  schedule: "*/15 * * * *"
+  # Break-glass release only (runbook section 2.3: disarm, deploy, arm): the
+  # change ticket, e.g. CHG-1234. Skips the release gate for this release and
+  # records the ticket on the Deployment; the CronJob keeps checking.
+  breakGlassTicket: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+    limits:
+      memory: 512Mi
+
+networkPolicy:
+  # Off by default: the mesh repo owns NetworkPolicy for the namespace
+  # (cicd-templates 1dd1138). Turn on only where the mesh policy is absent.
+  enabled: false
+  # Callers: the Istio ingress gateway; Prometheus scrapes the management port.
+  gatewayNamespace: istio-ingress
+  observabilityNamespace: observability
+  # Egress beyond DNS: the Aurora endpoint, OTLP and istiod. No identity
+  # provider: no endpoint validates tokens.
+  databasePort: 5432
+  # Required: VPC subnets of the Aurora cluster, e.g. ["10.0.32.0/20"]; rendering
+  # fails when empty, for an entry broader than /8 (IPv4) or /32 (IPv6),
+  # outside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 and fc00::/7, or not
+  # canonical (spaces, or leading zeros in an octet or the prefix).
+  databaseCidrs: []
+  otlpPort: 4318
+
+topologySpread:
+  maxSkew: 1

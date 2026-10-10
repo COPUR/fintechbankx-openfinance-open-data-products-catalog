@@ -18,4 +18,4 @@
 - This is an extraction seed for bounded-context split migration.
 - Follow-up refactoring may be needed to remove residual cross-context coupling.
 - Build artifacts and local machine files are excluded by policy.
-
+- 2026-10-08: seed turned into a deployable service. The service owns `sc_of_open_products_catalog` (PostgreSQL authority, ADR-0001) with its own Flyway migrations; the monolith has no product tables, so there is no backfill and the catalogue is loaded with `db/import/import-products.sh` (see `docs/migration/RUNBOOK-EXTRACT-of-open-products-catalog.md`). Old `infrastructure/` and `infra/terraform/` bootstrap paths replaced by `Dockerfile` and `deploy/`.

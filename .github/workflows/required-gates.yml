@@ -32,7 +32,9 @@ jobs:
         shell: bash
         run: |
           if [ -f build.gradle ] || [ -f settings.gradle ] || [ -f gradlew ]; then
-            if ! gradle --no-daemon clean assemble -x test; then
+            GRADLE=gradle
+            if [ -x ./gradlew ]; then GRADLE=./gradlew; fi
+            if ! $GRADLE --no-daemon clean assemble -x test; then
               if [ -f .ci/allow-gradle-fail ]; then
                 echo "Gradle build failed but .ci/allow-gradle-fail is present; continuing."
               else
@@ -52,6 +54,25 @@ jobs:
   test:
     name: ci/test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: db_of_open_products_catalog_test
+          POSTGRES_USER: open_products_test
+          POSTGRES_PASSWORD: open_products_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U open_products_test -d db_of_open_products_catalog_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # OpenProductsPostgresIT runs Flyway, the dev seed and the full service against this database.
+      TEST_DB_URL: jdbc:postgresql://localhost:5432/db_of_open_products_catalog_test
+      TEST_DB_USERNAME: open_products_test
+      TEST_DB_PASSWORD: open_products_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,7 +94,10 @@ jobs:
         shell: bash
         run: |
           if [ -f build.gradle ] || [ -f settings.gradle ] || [ -f gradlew ]; then
-            if ! gradle --no-daemon test; then
+            GRADLE=gradle
+            if [ -x ./gradlew ]; then GRADLE=./gradlew; fi
+            # check = tests + the jacoco LINE >= 0.85 gate.
+            if ! $GRADLE --no-daemon check; then
               if [ -f .ci/allow-gradle-fail ]; then
                 echo "Gradle test failed but .ci/allow-gradle-fail is present; continuing."
               else
@@ -89,6 +113,30 @@ jobs:
           else
             echo "No package.json test in this repository; skipping Node test."
           fi
+
+      - name: TDD guard (ADR-029) - production changes need test changes
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          NO_BEHAVIOUR_CHANGE: ${{ contains(github.event.pull_request.labels.*.name, 'no-behaviour-change') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF"
+          changed="$(git diff --name-only "origin/${BASE_REF}...HEAD")"
+          main_changes="$(printf '%s\n' "$changed" | grep -E '(^|/)src/main/' || true)"
+          test_changes="$(printf '%s\n' "$changed" | grep -E '(^|/)src/test/' || true)"
+          if [ -n "$main_changes" ] && [ -z "$test_changes" ]; then
+            if [ "$NO_BEHAVIOUR_CHANGE" = "true" ]; then
+              echo "src/main changed without src/test changes; allowed by label no-behaviour-change."
+            else
+              echo "This PR changes src/main but no file under src/test (ADR-029):"
+              printf '%s\n' "$main_changes"
+              echo "Add or update tests, or label the PR no-behaviour-change if it truly changes no behaviour."
+              exit 1
+            fi
+          fi
+          echo "TDD guard passed."
 
       - name: OpenAPI contract lint
         if: ${{ hashFiles('openapi/*.yaml') != '' || hashFiles('api/openapi/*.yaml') != '' || hashFiles('src/main/resources/openapi/*.yaml') != '' }}

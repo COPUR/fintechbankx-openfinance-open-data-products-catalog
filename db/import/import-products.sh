@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# Loads the product catalogue from a CSV into svc-of-open-products-catalog's
+# own database (sc_of_open_products_catalog.product). Idempotent upsert:
+#   - new product_id            -> inserted (version 0)
+#   - existing, values changed  -> updated, updated_at = now(), version + 1
+#   - existing, values the same -> untouched (ETag stays stable)
+# Ids starting with SAMPLE- are reserved for the dev/CI seed and rejected.
+# Modes:
+#   --full  (default) the file is the whole signed-off catalogue: ACTIVE
+#           products missing from it are withdrawn (status WITHDRAWN,
+#           version + 1); SAMPLE- seed rows are never touched. An empty file
+#           is refused.
+#   --delta the file holds only some products; products missing from it are
+#           left as they are.
+# Products are never deleted. effective_from/effective_to must carry a UTC
+# offset (2026-03-01T00:00:00Z or +04:00); they are stored as instants.
+# The whole file is applied in one transaction: any bad row aborts the import.
+# Every inserted or updated row is recorded in product_history (V2 trigger)
+# with the role, application_name "import-products/<operator>" and, since V3,
+# operator_arn: the AWS caller identity of whoever runs this script, taken
+# from `aws sts get-caller-identity` (the same credentials that fetched the
+# db-import secret, so CloudTrail's GetSecretValue event names the same
+# principal). The script refuses to run without it, and the database refuses
+# changes as the import role that carry none.
+#
+#   IMPORT_OPERATOR=<your id> db/import/import-products.sh [--full|--delta] <conninfo> <products.csv>
+#
+# Needs the AWS CLI with the operator's own credentials (SSO or role session).
+# Runs only as the import role (open_products_catalog_import, credential in
+# <env>/open-products-catalog-service/db-import), which may SELECT, INSERT and
+# UPDATE product but not DELETE. Example conninfo:
+# "host=<aurora-writer> dbname=db_of_open_products_catalog_prod user=open_products_catalog_import sslmode=verify-full sslrootcert=<rds-ca-bundle.pem>".
+# Passwords come from PGPASSWORD or ~/.pgpass, never from arguments.
+# CSV header (see products.example.csv):
+#   product_id,product_type,segment,name,description,currency,monthly_fee_amount,
+#   annual_rate_percent,eligibility,status,effective_from,effective_to
+set -euo pipefail
+
+mode=full
+case "${1:-}" in
+  --full) mode=full; shift ;;
+  --delta) mode=delta; shift ;;
+esac
+if [ "$#" -ne 2 ]; then
+  echo "usage: $0 [--full|--delta] <conninfo> <products.csv>" >&2
+  exit 2
+fi
+
+target_db="$1"
+csv="$2"
+schema="${OPEN_PRODUCTS_SCHEMA:-sc_of_open_products_catalog}"
+import_role="${OPEN_PRODUCTS_IMPORT_ROLE:-open_products_catalog_import}"
+operator="${IMPORT_OPERATOR:-}"
+
+if [ ! -r "$csv" ]; then
+  echo "cannot read $csv" >&2
+  exit 2
+fi
+if ! [[ "$schema" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+  echo "invalid schema name '$schema'" >&2
+  exit 2
+fi
+if ! [[ "$import_role" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+  echo "invalid import role name '$import_role'" >&2
+  exit 2
+fi
+# The operator's id goes into product_history.application_name (max 63 bytes).
+if ! [[ "$operator" =~ ^[A-Za-z0-9._@-]{1,40}$ ]]; then
+  echo "set IMPORT_OPERATOR to your operator id (1-40 of A-Z a-z 0-9 . _ @ -)" >&2
+  exit 2
+fi
+# Who is running the import, as AWS knows it (never typed by the operator).
+if ! operator_arn="$(aws sts get-caller-identity --query Arn --output text 2> /dev/null)"; then
+  echo "cannot read your AWS caller identity (aws sts get-caller-identity); sign in with your operator credentials first" >&2
+  exit 2
+fi
+if ! [[ "$operator_arn" =~ ^arn:aws[a-z-]*:(sts|iam)::[0-9]{12}:(assumed-role|user|federated-user)/[A-Za-z0-9+=,.@_/-]+$ ]]; then
+  echo "refusing AWS caller identity '$operator_arn': use your own operator principal, never the account root" >&2
+  exit 2
+fi
+echo "importing as AWS principal $operator_arn" >&2
+expected_header="product_id,product_type,segment,name,description,currency,monthly_fee_amount,annual_rate_percent,eligibility,status,effective_from,effective_to"
+if [ "$(head -n 1 "$csv" | tr -d '\r')" != "$expected_header" ]; then
+  echo "unexpected CSV header; expected: $expected_header" >&2
+  exit 2
+fi
+
+# psql reads the CSV client-side (\copy), so the file never has to be on the DB host.
+csv_literal="${csv//\'/\'\'}"
+psql -X -q -v ON_ERROR_STOP=1 -v app_name="import-products/$operator" -v operator_arn="$operator_arn" -v mode="$mode" "$target_db" <<SQL
+\set QUIET on
+BEGIN;
+SET LOCAL search_path = $schema;
+SET LOCAL application_name = :'app_name';
+-- Read by the product_history trigger (V3) into operator_arn.
+SET LOCAL fbx.operator_arn = :'operator_arn';
+SET LOCAL TimeZone = 'UTC';
+
+-- Only the import role may load the catalogue (never the owner or an admin).
+DO \$\$
+BEGIN
+    IF current_user <> '$import_role' THEN
+        RAISE EXCEPTION 'refusing to import as %: connect as $import_role', current_user;
+    END IF;
+END
+\$\$;
+
+CREATE TEMP TABLE product_import (
+    product_id          text,
+    product_type        text,
+    segment             text,
+    name                text,
+    description         text,
+    currency            text,
+    monthly_fee_amount  numeric,
+    annual_rate_percent numeric,
+    eligibility         text,
+    status              text,
+    -- Read as text so a value without an offset can be rejected, not guessed.
+    effective_from      text,
+    effective_to        text
+) ON COMMIT DROP;
+
+\copy product_import FROM '$csv_literal' WITH (FORMAT csv, HEADER true)
+
+-- Codes are stored upper-case (filters match case-insensitively); blanks become NULL.
+UPDATE product_import SET
+    product_id   = btrim(product_id),
+    product_type = upper(btrim(product_type)),
+    segment      = upper(btrim(segment)),
+    name         = btrim(name),
+    description  = nullif(btrim(description), ''),
+    currency     = upper(btrim(currency)),
+    eligibility  = nullif(btrim(eligibility), ''),
+    status       = upper(btrim(coalesce(nullif(status, ''), 'ACTIVE'))),
+    effective_from = btrim(effective_from),
+    effective_to   = nullif(btrim(effective_to), '');
+
+DO \$\$
+DECLARE
+    dup text;
+BEGIN
+    SELECT string_agg(product_id, ', ') INTO dup
+      FROM (SELECT product_id FROM product_import GROUP BY product_id HAVING count(*) > 1) d;
+    IF dup IS NOT NULL THEN
+        RAISE EXCEPTION 'duplicate product_id in CSV: %', dup;
+    END IF;
+    -- SAMPLE- ids belong to the dev/CI seed; the real catalogue never uses them.
+    SELECT string_agg(product_id, ', ') INTO dup
+      FROM product_import
+     WHERE upper(product_id) LIKE 'SAMPLE-%';
+    IF dup IS NOT NULL THEN
+        RAISE EXCEPTION 'product_id in the reserved SAMPLE- namespace: %', dup;
+    END IF;
+    SELECT string_agg(product_id, ', ') INTO dup
+      FROM product_import
+     WHERE effective_from !~ '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}(:?\d{2})?)\$'
+        OR effective_to   !~ '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}(:?\d{2})?)\$';
+    IF dup IS NOT NULL THEN
+        RAISE EXCEPTION 'effective_from/effective_to without a UTC offset (use Z or +hh:mm) for: %', dup;
+    END IF;
+    IF '$mode' = 'full' AND NOT EXISTS (SELECT 1 FROM product_import) THEN
+        RAISE EXCEPTION 'a full import with no products would withdraw the whole catalogue';
+    END IF;
+    -- Money is never rounded on import: more than two decimals is an error.
+    SELECT string_agg(product_id, ', ') INTO dup
+      FROM product_import
+     WHERE scale(monthly_fee_amount) > 2 OR scale(annual_rate_percent) > 2;
+    IF dup IS NOT NULL THEN
+        RAISE EXCEPTION 'amounts with more than two decimals for: %', dup;
+    END IF;
+END
+\$\$;
+
+-- Table CHECK constraints validate codes, currency, amounts, status and dates.
+WITH upserted AS (
+    INSERT INTO product AS p (product_id, product_type, segment, name, description, currency,
+                              monthly_fee_amount, monthly_fee_currency, annual_rate_percent,
+                              eligibility, status, effective_from, effective_to, updated_at)
+    SELECT product_id, product_type, segment, name, description, currency,
+           monthly_fee_amount, currency, annual_rate_percent,
+           eligibility, status, effective_from::timestamptz, effective_to::timestamptz, now()
+      FROM product_import
+    ON CONFLICT (product_id) DO UPDATE SET
+        product_type         = EXCLUDED.product_type,
+        segment              = EXCLUDED.segment,
+        name                 = EXCLUDED.name,
+        description          = EXCLUDED.description,
+        currency             = EXCLUDED.currency,
+        monthly_fee_amount   = EXCLUDED.monthly_fee_amount,
+        monthly_fee_currency = EXCLUDED.monthly_fee_currency,
+        annual_rate_percent  = EXCLUDED.annual_rate_percent,
+        eligibility          = EXCLUDED.eligibility,
+        status               = EXCLUDED.status,
+        effective_from       = EXCLUDED.effective_from,
+        effective_to         = EXCLUDED.effective_to,
+        updated_at           = now(),
+        version              = p.version + 1
+    WHERE (p.product_type, p.segment, p.name, p.description, p.currency, p.monthly_fee_amount,
+           p.annual_rate_percent, p.eligibility, p.status, p.effective_from, p.effective_to)
+          IS DISTINCT FROM
+          (EXCLUDED.product_type, EXCLUDED.segment, EXCLUDED.name, EXCLUDED.description, EXCLUDED.currency,
+           EXCLUDED.monthly_fee_amount, EXCLUDED.annual_rate_percent, EXCLUDED.eligibility, EXCLUDED.status,
+           EXCLUDED.effective_from, EXCLUDED.effective_to)
+    RETURNING (xmax = 0) AS inserted
+)
+SELECT format('rows in file: %s, inserted: %s, updated: %s, unchanged: %s',
+              (SELECT count(*) FROM product_import),
+              count(*) FILTER (WHERE inserted),
+              count(*) FILTER (WHERE NOT inserted),
+              (SELECT count(*) FROM product_import) - count(*)) AS import_summary
+  FROM upserted \gset
+
+-- Full import: ACTIVE products missing from the file are withdrawn, never deleted.
+WITH withdrawn AS (
+    UPDATE product p SET
+        status     = 'WITHDRAWN',
+        updated_at = now(),
+        version    = p.version + 1
+     WHERE :'mode' = 'full'
+       AND p.status = 'ACTIVE'
+       AND p.product_id NOT LIKE 'SAMPLE-%'
+       AND NOT EXISTS (SELECT 1 FROM product_import i WHERE i.product_id = p.product_id)
+    RETURNING 1
+)
+SELECT format('mode: %s, withdrawn: %s', :'mode', count(*)) AS withdraw_summary FROM withdrawn \gset
+\echo :import_summary, :withdraw_summary
+COMMIT;
+SQL

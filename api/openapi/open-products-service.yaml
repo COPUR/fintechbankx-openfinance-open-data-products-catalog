@@ -32,18 +32,58 @@ paths:
             ETag:
               schema:
                 type: string
+            Cache-Control:
+              description: >-
+                no-cache. The response echoes the caller's X-FAPI-Interaction-ID, so
+                caches must revalidate every reuse with If-None-Match (cheap 304).
+              schema:
+                type: string
+                example: no-cache
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProductListResponse'
         '304':
           description: Not modified
+          headers:
+            X-FAPI-Interaction-ID:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
         '400':
-          description: Invalid request
+          description: >-
+            Invalid request: X-FAPI-Interaction-ID missing, or a type/segment
+            filter that does not match ^[A-Z0-9_-]{2,30}$ once upper-cased.
+          headers:
+            X-FAPI-Interaction-ID:
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: >-
+            Too many requests. Returned by the API gateway's rate limit (a token
+            bucket of 100 refilled at 50 per second, per gateway pod), not by the
+            service; retry after the number of seconds in Retry-After.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+                minimum: 0
+            x-fbx-rate-limited:
+              description: Set to true by the gateway when it rejected the request for its rate limit.
+              schema:
+                type: string
+                enum:
+                  - 'true'
 components:
   parameters:
     InteractionId:
@@ -62,14 +102,26 @@ components:
       name: type
       in: query
       required: false
+      description: >-
+        Product type code, matched case-insensitively. Must match
+        ^[A-Z0-9_-]{2,30}$ once trimmed and upper-cased (2 to 30 ASCII letters,
+        digits, underscores or hyphens); anything else is rejected with 400.
+        Blank means no filter.
       schema:
         type: string
+        maxLength: 30
     Segment:
       name: segment
       in: query
       required: false
+      description: >-
+        Product segment code, matched case-insensitively. Must match
+        ^[A-Z0-9_-]{2,30}$ once trimmed and upper-cased (2 to 30 ASCII letters,
+        digits, underscores or hyphens); anything else is rejected with 400.
+        Blank means no filter.
       schema:
         type: string
+        maxLength: 30
     IfNoneMatch:
       name: If-None-Match
       in: header
@@ -92,6 +144,8 @@ components:
           properties:
             Self:
               type: string
+              description: Relative link to this result, e.g. /open-finance/v1/products?type=PCA
+              example: /open-finance/v1/products?type=PCA
         Meta:
           type: object
           properties:

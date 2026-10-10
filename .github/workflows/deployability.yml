@@ -1,0 +1,717 @@
+name: Deployability
+
+# Proves every change still produces a runnable image and valid deployment
+# manifests, and rehearses the catalogue's data path. Nothing is pushed or
+# applied from here.
+
+on:
+  pull_request:
+    branches: [main, dev, staging]
+  push:
+    branches: [main, dev, staging]
+
+permissions:
+  contents: read
+
+jobs:
+  container:
+    name: deploy/container-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --tag open-products-catalog-service:${{ github.sha }} .
+      - name: Image runs as non-root
+        run: |
+          user="$(docker image inspect --format '{{.Config.User}}' open-products-catalog-service:${{ github.sha }})"
+          echo "image user: $user"
+          test "$user" = "10001:10001"
+
+  helm:
+    name: deploy/helm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Vendored platform guard is unchanged (header sha256) and included once in the workload template
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          file="$chart/templates/_fbx_helpers.tpl"
+          # The header names source, commit, path and sha256; the sha256 covers everything after the
+          # first line that is exactly '*/}}' (the unchanged platform file).
+          want="$(sed -n 's/^sha256: *\([0-9a-f]\{64\}\)$/\1/p' "$file" | head -n 1)"
+          test -n "$want" || { echo "$file: no sha256 line in the header"; exit 1; }
+          grep -qx 'commit: a4f0072' "$file" || { echo "$file: header must name commit a4f0072"; exit 1; }
+          got="$(awk 'f {print} !f && $0 == "*/}}" {f=1}' "$file" | sha256sum | cut -d ' ' -f 1)"
+          if [ "$got" != "$want" ]; then
+            echo "$file: body sha256 $got, header records $want: re-copy the platform file unchanged"; exit 1
+          fi
+          # fbx.guard is included exactly once, in the workload template, before its first apiVersion:.
+          workload="$chart/templates/deployment.yaml"
+          n="$(grep -l 'include "fbx.guard"' "$chart"/templates/* | grep -cv '_fbx_helpers.tpl$' || true)"
+          [ "$n" = 1 ] || { echo "include \"fbx.guard\" must be in exactly one template (found $n)"; exit 1; }
+          [ "$(grep -c 'include "fbx.guard"' "$workload")" = 1 ] || { echo "$workload must include fbx.guard exactly once"; exit 1; }
+          guard="$(grep -n 'include "fbx.guard"' "$workload" | cut -d: -f1)"
+          api="$(grep -n '^apiVersion:' "$workload" | head -n 1 | cut -d: -f1)"
+          [ "$guard" -lt "$api" ] || { echo "$workload: fbx.guard must be included before the first apiVersion: (line $guard, apiVersion line $api)"; exit 1; }
+          echo "$file body sha256 $got; fbx.guard included once, line $guard of $workload"
+      - name: Lint and render chart
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          args="--set image.repository=ci/open-products-catalog-service --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=ci/open-products-catalog-service/db-migration --set config.DB_URL=jdbc:postgresql://ci-writer.example.internal:5432/db_of_open_products_catalog_ci?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem --set networkPolicy.enabled=true --set networkPolicy.databaseCidrs={10.0.32.0/20}"
+          helm template ci "$chart" ${args%% --set networkPolicy.enabled=*} > /dev/null
+          helm lint "$chart" $args
+          helm template ci "$chart" $args > rendered.yaml
+          helm template ci "$chart" -f "$chart/values-dev.yaml" $args > /dev/null
+      - name: Rendering fails without database CIDRs
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+               --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+               --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true > /dev/null 2> cidr.err; then
+            echo "chart rendered with an empty networkPolicy.databaseCidrs"
+            exit 1
+          fi
+          grep -q "databaseCidrs is required" cidr.err
+      - name: Rendering fails for a /0 database CIDR
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          for cidr in 0.0.0.0/0 ::/0; do
+            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+                 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+                 --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
+                 --set "networkPolicy.databaseCidrs={10.0.32.0/20,$cidr}" > /dev/null 2> cidr0.err; then
+              echo "chart rendered with networkPolicy.databaseCidrs containing $cidr"
+              exit 1
+            fi
+            grep -q "never /0" cidr0.err
+          done
+      - name: Rendering fails for a database CIDR broader than /8 (IPv4) or /32 (IPv6)
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          # Two /1 halves cover everything as well as /0 does.
+          for cidrs in '0.0.0.0/1,128.0.0.0/1' '10.0.0.0/7' '::/1,8000::/1' '2001:db8::/31' '10.0.32.0'; do
+            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+                 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+                 --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
+                 --set "networkPolicy.databaseCidrs={$cidrs}" > /dev/null 2> cidr8.err; then
+              echo "chart rendered with networkPolicy.databaseCidrs {$cidrs}"
+              exit 1
+            fi
+            grep -q "too broad" cidr8.err
+          done
+          # The floors themselves are accepted.
+          helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+            --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
+            --set "networkPolicy.databaseCidrs={10.0.0.0/8,fd00::/32}" > /dev/null
+      - name: Rendering fails for a database CIDR outside the private ranges
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          # Only 10/8, 172.16/12, 192.168/16 and fc00::/7; IPv4-mapped IPv6 is refused.
+          for cidr in 8.8.8.0/24 11.0.0.0/8 172.32.0.0/16 172.15.0.0/16 192.169.0.0/16 100.64.0.0/10 \
+                      2001:db8::/48 fe80::/64 ::ffff:10.0.0.0/104 ::ffff:a00:0/104 10.0.300.0/24; do
+            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+                 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+                 --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
+                 --set "networkPolicy.databaseCidrs={$cidr}" > /dev/null 2> private.err; then
+              echo "chart rendered with networkPolicy.databaseCidrs {$cidr}"
+              exit 1
+            fi
+            grep -q "private range" private.err
+          done
+          # Each private range at its floor renders.
+          helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+            --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
+            --set "networkPolicy.databaseCidrs={10.0.0.0/8,172.16.0.0/12,172.31.255.0/24,192.168.0.0/16,fc00::/32,fdab:cdef::/48}" > /dev/null
+      - name: Rendering fails for a database CIDR with leading zeros or surrounding spaces
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          # Written exactly as Kubernetes parses it: no leading zero in an octet or the
+          # prefix (Go's net.ParseCIDR refuses them), no space around the entry.
+          for cidr in '010.0.32.0/20' '10.0.032.0/20' '10.00.32.0/20' '10.0.32.00/24' '10.0.32.0/020' \
+                      '10.0.32.0/20 ' ' 10.0.32.0/20' '10.0.32.0 /20'; do
+            printf 'networkPolicy:\n  databaseCidrs: ["%s"]\n' "$cidr" > cidr-values.yaml
+            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+                 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+                 --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
+                 -f cidr-values.yaml > /dev/null 2> canonical.err; then
+              echo "chart rendered with networkPolicy.databaseCidrs [\"$cidr\"]"
+              exit 1
+            fi
+            grep -q "canonical" canonical.err || { cat canonical.err; exit 1; }
+          done
+          rm -f cidr-values.yaml
+          # Zero octets and single digits stay valid.
+          helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+            --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
+            --set "networkPolicy.databaseCidrs={10.0.0.0/8,10.0.32.0/20,192.168.0.0/16,172.16.0.0/12}" > /dev/null
+      - name: Rendering fails unless JDBC verifies the server certificate
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          for url in 'jdbc:postgresql://ci/x?sslmode=require' \
+                     'jdbc:postgresql://ci/x?sslmode=verify-full' \
+                     'jdbc:postgresql://ci/x?sslmode=verify-ca&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'; do
+            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+                 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+                 --set "config.DB_URL=$url" > /dev/null 2> tls.err; then
+              echo "chart rendered with config.DB_URL=$url"
+              exit 1
+            fi
+            # The vendored guard (deployment.yaml) renders before configmap.yaml's strict parse, so the
+            # message names either the mode or the mounted bundle.
+            grep -qE "sslmode=verify-full|sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem exactly once" tls.err
+          done
+      - name: Rendering fails for a repeated sslmode or sslrootcert
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          ca=sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem
+          for url in "jdbc:postgresql://ci/x?sslmode=verify-full&$ca&sslmode=disable" \
+                     "jdbc:postgresql://ci/x?sslmode=disable&sslmode=verify-full&$ca" \
+                     "jdbc:postgresql://ci/x?sslmode=verify-full&$ca&sslrootcert=/tmp/other.pem" \
+                     "jdbc:postgresql://ci/x?sslmode=verify-full&$ca&SSLMODE=disable"; do
+            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+                 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+                 --set "config.DB_URL=$url" > /dev/null 2> tls2.err; then
+              echo "chart rendered with config.DB_URL=$url"
+              exit 1
+            fi
+            # The vendored guard renders first: "exactly once", or "in lower case" for SSLMODE.
+            grep -qE "exactly once|must spell SSLMODE in lower case" tls2.err
+          done
+      - name: Rendering fails for any JDBC parameter that is not explicitly allowed
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          base="jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
+          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          # Each of these can switch certificate or host-name checks off or redirect the connection.
+          for extra in sslfactory=org.postgresql.ssl.NonValidatingFactory sslhostnameverifier=x.AllowAll \
+                       service=other sslcert=/tmp/c.pem sslkey=/tmp/k.pem loggerLevel=TRACE; do
+            if helm template ci "$chart" $common --set "config.DB_URL=$base&$extra" > /dev/null 2> param.err; then
+              echo "chart rendered with config.DB_URL=$base&$extra"
+              exit 1
+            fi
+            # sslfactory, sslhostnameverifier and service: the vendored guard's "must not set" (it renders first).
+            grep -qE "not allowed|must not set (sslfactory|sslhostnameverifier|service)" param.err
+          done
+          # An explicitly allowed parameter renders; an ssl* or service parameter never does.
+          helm template ci "$chart" $common --set "config.DB_URL=$base&connectTimeout=5" \
+            --set "databaseUrlAllowedParams={connectTimeout}" > /dev/null
+          if helm template ci "$chart" $common --set "config.DB_URL=$base&sslfactory=x" \
+               --set "databaseUrlAllowedParams={sslfactory}" > /dev/null 2> param.err; then
+            echo "chart rendered an allow-listed sslfactory"
+            exit 1
+          fi
+          grep -q "must not set sslfactory" param.err
+      - name: Rendering fails for a malformed DB_URL and for datasource, Flyway, Liquibase, R2DBC or JVM overrides in config
+        run: |
+          # Same rules as consent, payee and atm (strict parse after cicd-templates 13ca2c6
+          # charts/fintechbankx-service/templates/_helpers.tpl:105-211): jdbc:postgresql:// only, nothing that looks like a
+          # parameter before the '?', no percent-encoded '=' or '&' in the query (allow-listed values
+          # included), and nothing in config that can reach the datasource around config.DB_URL.
+          chart=deploy/helm/open-products-catalog-service
+          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          q='sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
+          url="jdbc:postgresql://ci/x?$q"
+          work="$(mktemp -d)"
+          values() { f="$(mktemp -p "$work")"; printf '%s\n' 'config:' "$@" > "$f"; echo "$f"; }
+          failed=0
+          must_fail() {  # <expected text in the error> <helm args...>
+            local expect="$1"; shift
+            if helm template ci "$chart" $common "$@" > /dev/null 2> "$work/err"; then
+              echo "chart rendered with: $*"; failed=1
+            elif ! grep -q -- "$expect" "$work/err"; then
+              echo "render failed for another reason than '$expect' with: $*"; cat "$work/err"; failed=1
+            fi
+          }
+          # The allow-listed parameter and SPRING_DATASOURCE_USERNAME still render.
+          helm template ci "$chart" $common --set "databaseUrlAllowedParams={ApplicationName}" \
+            -f "$(values "  DB_URL: \"$url&ApplicationName=products\"" '  SPRING_DATASOURCE_USERNAME: open_products_catalog_app')" > /dev/null
+          # (a) jdbc:postgresql:// only, with no leading space (the startup check refuses anything else)
+          for bad in "jdbc:mysql://ci/x?$q" " $url" "jdbc:aws-wrapper:postgresql://ci/x?$q" "JDBC:postgresql://ci/x?$q"; do
+            must_fail config.DB_URL -f "$(values "  DB_URL: \"$bad\"")"
+          done
+          # (b) nothing that looks like a parameter before the '?'
+          for bad in "jdbc:postgresql://ci/x;sslmode=disable?$q" "jdbc:postgresql://ci/x&sslfactory=x?$q" "jdbc:postgresql://ci/x%3F?$q"; do
+            must_fail config.DB_URL -f "$(values "  DB_URL: \"$bad\"")"
+          done
+          # (c) no percent-encoded '=' or '&', even in the value of an allow-listed parameter
+          for extra in 'ApplicationName=a%26sslmode%3Ddisable' 'ApplicationName=a%3dsslmode' 'ApplicationName=a%26b'; do
+            must_fail config.DB_URL --set "databaseUrlAllowedParams={ApplicationName}" -f "$(values "  DB_URL: \"$url&$extra\"")"
+          done
+          # (d) datasource, Flyway, Liquibase and R2DBC keys in any spelling (SPRING_DATASOURCE_USERNAME
+          # excepted), keys naming a JDBC URL, an SSL factory or a host name verifier, and a jdbc: value
+          # anywhere but config.DB_URL
+          for key in SPRING_DATASOURCE_URL spring.datasource.url SPRING_DATASOURCE_HIKARI_DATA_SOURCE_PROPERTIES_SSLFACTORY \
+                     SPRING_FLYWAY_URL SPRING_FLYWAY_USER SPRING_LIQUIBASE_USER spring.liquibase.url SPRING_R2DBC_URL \
+                     spring.r2dbc.url MY_JDBC_URL APP_JDBCURL X_SSLFACTORY APP_SSLHOSTNAMEVERIFIER; do
+            must_fail "config.$key" -f "$(values "  DB_URL: \"$url\"" "  $key: x")"
+          done
+          for key in OTHER_URL OTHER; do
+            must_fail "config.$key" -f "$(values "  DB_URL: \"$url\"" "  $key: \"JDBC:postgresql://ci/x?sslmode=disable\"")"
+          done
+          # (e) JVM option variables (_JAVA_OPTIONS included) that mention jdbc, ssl, spring, flyway,
+          # liquibase, datasource or r2dbc
+          for opt in '_JAVA_OPTIONS: -Dspring.datasource.hikari.data-source-properties.sslmode=disable' \
+                     'JAVA_TOOL_OPTIONS: -Djavax.net.ssl.trustStore=/tmp/t.jks' 'JAVA_TOOL_OPTIONS: -Dflyway.url=x' \
+                     'JDK_JAVA_OPTIONS: -Ddatasource.x=1' 'JAVA_TOOL_OPTIONS: -Dliquibase.x=1' 'JAVA_OPTS: -Dr2dbc.x=1' \
+                     'JAVA_OPTS: -Djdbc.drivers=x.Evil'; do
+            must_fail "config.${opt%%:*}" -f "$(values "  DB_URL: \"$url\"" "  $opt")"
+          done
+          # Round 8 (cicd-templates 2caa48f): the strict-step helpers under the names this step uses.
+          good="$url"; base="$common"
+          # (h) JVM options that set spring.config.* / spring.profiles.* / Kafka properties or read
+          # options from a file ('@' argument file, -XX:VMOptionsFile, -XX:Flags), in every JVM
+          # option variable (cicd-templates 2caa48f fbx.validateJvmOptions); values go through a file
+          # so spaces and '@' reach the chart unchanged.
+          jvm="$(mktemp -d)"
+          for name in JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS JAVA_OPTS; do
+            for value in '-Dspring.config.import=optional:file:/tmp/x.yml' '-Dspring.profiles.active=local' \
+                         '-Dkafka.security.protocol=PLAINTEXT' '@/tmp/opts' '-Xmx1g @/tmp/opts' \
+                         '-XX:VMOptionsFile=/tmp/opts' '-XX:Flags=/tmp/flags'; do
+              v="$jvm/$(printf 'config %s=%s' "$name" "$value" | tr -c 'A-Za-z0-9._=-' '_').yaml"
+              printf 'config:\n  DB_URL: "%s"\n  %s: "%s"\n' "$good" "$name" "$value" > "$v"
+              must_fail "config.$name" -f "$v"
+            done
+          done
+          # JVM options that only size the heap still render.
+          printf 'config:\n  DB_URL: "%s"\n  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=70 -Xss1m"\n' "$good" > "$jvm/v.yaml"
+          helm template ci "$chart" $base -f "$jvm/v.yaml" > /dev/null
+          rm -rf "$jvm"
+          common="$common --set config.DB_URL=$url"
+          # Any suffix and spring.config.name (cicd-templates 2caa48f fbx.datasourceOverrideName),
+          # spring.kafka.* and spring.ssl.* (protocol, trust store, SSL bundles), and the chart-owned
+          # deployment marker FBX_DEPLOYED in any spelling. Keys go through a values file, so
+          # spring.config.import[0] stays one key.
+          keys="$(mktemp -d)"
+          for key in SPRING_CONFIG_IMPORT_0 "'spring.config.import[0]'" SPRING_CONFIG_LOCATION_0 SPRING_CONFIG_ADDITIONAL_LOCATION_0 \
+                     SPRING_CONFIG_NAME spring.config.name SPRING_KAFKA_SECURITY_PROTOCOL spring.kafka.bootstrap-servers \
+                     SPRING_KAFKA_PROPERTIES_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM SPRING_SSL_BUNDLE_PEM_RDS_TRUSTSTORE_CERTIFICATE \
+                     spring.ssl.bundle.jks.x.truststore.location FBX_DEPLOYED fbx.deployed Fbx-Deployed; do
+            v="$keys/$(printf 'config %s' "$key" | tr -c 'A-Za-z0-9._-' '_').yaml"
+            printf 'config:\n  %s: x\n' "$key" > "$v"
+            # The vendored guard renders first; with no Kafka client (kafka.runtime "") it refuses a
+            # Kafka protocol key for that reason and an endpoint identification other than https.
+            case "$key" in
+              SPRING_KAFKA_SECURITY_PROTOCOL) expect="is set but kafka.runtime is empty" ;;
+              *ENDPOINT_IDENTIFICATION_ALGORITHM) expect="must be https" ;;
+              *) expect="is not allowed" ;;
+            esac
+            must_fail "$expect" -f "$v"
+            v="$keys/$(printf 'extraEnv %s' "$key" | tr -c 'A-Za-z0-9._-' '_').yaml"
+            printf 'extraEnv:\n  - name: %s\n    value: x\n' "$key" > "$v"
+            must_fail "extraEnv" -f "$v"
+          done
+          for name in JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS JAVA_OPTS; do
+            v="$keys/extraEnv_${name}_valueFrom.yaml"
+            printf 'extraEnv:\n  - name: %s\n    valueFrom:\n      secretKeyRef: {name: s, key: k}\n' "$name" > "$v"
+            must_fail "extraEnv" -f "$v"
+          done
+          rm -rf "$keys"
+          # Hikari settings that replace the checked URL or its TLS (also refused at startup).
+          for key in SPRING_DATASOURCE_HIKARI_JDBC_URL SPRING_DATASOURCE_HIKARI_DATASOURCEPROPERTIES_SSLFACTORY \
+                     spring.datasource.hikari.data-source-properties.sslmode; do
+            must_fail "config.$key" -f "$(values "  $key: x")"
+          done
+          rm -rf "$work"
+          exit $failed
+      - name: Rendering fails unless each container gets its own database credential
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          common="--set image.repository=ci/x --set image.tag=1 --set config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
+          # The import credential (db-import) never reaches the cluster, under either name.
+          for pair in 'ci/x/db-import ci/x/db-migration' 'ci/x/db-import/db-app ci/x/db-migration' \
+                      'ci/x/db-app ci/x/db-import' 'ci/x/db-app ci/x/db-import/db-migration'; do
+            set -- $pair
+            if helm template ci "$chart" $common --set "externalSecret.remoteSecretName=$1" \
+                 --set "externalSecret.migrationRemoteSecretName=$2" > /dev/null 2> secret.err; then
+              echo "chart rendered with remoteSecretName=$1 migrationRemoteSecretName=$2"
+              exit 1
+            fi
+            grep -q "db-import" secret.err
+          done
+          # The runtime gets <env>/<service>/db-app, the migrate init container <env>/<service>/db-migration.
+          for pair in 'ci/x/db-migration ci/x/db-migration' 'ci/x/db-app-old ci/x/db-migration' 'db-app ci/x/db-migration' \
+                      'ci/x/db-app ci/x/db-app' 'ci/x/db-app ci/x/db-migration-old' 'ci/x/db-app db-migration'; do
+            set -- $pair
+            if helm template ci "$chart" $common --set "externalSecret.remoteSecretName=$1" \
+                 --set "externalSecret.migrationRemoteSecretName=$2" > /dev/null 2> secret.err; then
+              echo "chart rendered with remoteSecretName=$1 migrationRemoteSecretName=$2"
+              exit 1
+            fi
+            grep -q "must end with /db-" secret.err
+          done
+          helm template ci "$chart" $common --set externalSecret.remoteSecretName=ci/x/db-app \
+            --set externalSecret.migrationRemoteSecretName=ci/x/db-migration > /dev/null
+      - name: Rendering fails for a Spring config location set through values
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          url='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
+          # Any spelling Spring's relaxed binding reads as spring.config.import, .location or
+          # .additional-location (indexed, lower case, dotted, dash dropped), SPRING_APPLICATION_JSON
+          # (which can carry them), and a configtree import: the chart renders none of them.
+          for key in SPRING_CONFIG_IMPORT SPRING_CONFIG_LOCATION SPRING_CONFIG_ADDITIONAL_LOCATION \
+                     spring_config_import SPRING_CONFIG_IMPORT_0_ SPRING_CONFIG_ADDITIONALLOCATION \
+                     spring.config.import spring.config.additional-location SPRING_APPLICATION_JSON; do
+            printf 'config:\n  DB_URL: "%s"\n  "%s": "optional:configtree:/etc/fintechbankx/config/"\n' "$url" "$key" > override-values.yaml
+            if helm template ci "$chart" $common -f override-values.yaml > /dev/null 2> override.err; then
+              echo "chart rendered with config.$key"
+              exit 1
+            fi
+            # The vendored guard renders first and names spring.config.* / SPRING_APPLICATION_JSON itself.
+            grep -qE "config location|is not allowed: a spring.config|APPLICATION_JSON is not allowed: it can redirect" override.err || { cat override.err; exit 1; }
+          done
+          printf 'config:\n  DB_URL: "%s"\nextraEnv:\n  - name: SPRING_CONFIG_IMPORT\n    value: "optional:file:/tmp/x.yaml"\n' "$url" > override-values.yaml
+          if helm template ci "$chart" $common -f override-values.yaml > /dev/null 2> override.err; then
+            echo "chart rendered with extraEnv SPRING_CONFIG_IMPORT"
+            exit 1
+          fi
+          grep -qE "config location|extraEnv must not set SPRING_CONFIG_IMPORT" override.err || { cat override.err; exit 1; }
+          rm -f override-values.yaml
+          # The default render sets none of them.
+          if grep -niE 'spring[._]config[._]|spring_application_json|configtree' rendered.yaml; then
+            echo "rendered chart sets a Spring config location"
+            exit 1
+          fi
+      - name: Rendering fails for a Spring profile set through values (startup TLS assertion)
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          url='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
+          # Round 6 (as in retail and corporate): DatabaseTlsEnvironmentPostProcessor runs under the aws
+          # profile the chart renders on every container. Nothing in values may change the profiles:
+          # SPRING_PROFILES_* in config or extraEnv in any spelling Spring's relaxed binding reads
+          # (case, ".", "_" and "-" ignored), SPRING_APPLICATION_JSON, and JVM option variables that
+          # set spring.profiles.* (for example a local profile). There is no enforce flag.
+          work="$(mktemp -d)"
+          values() { f="$(mktemp -p "$work")"; printf '%s\n' 'config:' "  DB_URL: \"$url\"" "$@" > "$f"; echo "$f"; }
+          must_refuse() {
+            desc="$1"; expected="$2"; shift 2
+            if out="$(helm template ci "$chart" $common "$@" 2>&1)"; then echo "$desc must be refused"; exit 1; fi
+            echo "$out" | grep -qE "$expected" || { echo "$desc failed for another reason: $out"; exit 1; }
+          }
+          for name in SPRING_PROFILES_ACTIVE spring.profiles.active Spring-Profiles-Include SPRING_PROFILES_DEFAULT \
+                      spring_profiles_group_aws SPRING_PROFILESACTIVE; do
+            must_refuse "config.$name" 'startup TLS assertion|is not allowed: a profile' -f "$(values "  $name: local")"
+            must_refuse "extraEnv $name" 'startup TLS assertion|must not set .*: a profile' -f "$(values 'extraEnv:' "  - name: $name" '    value: local')"
+          done
+          must_refuse "extraEnv map SPRING_PROFILES_ACTIVE" 'startup TLS assertion|must not set SPRING_PROFILES_ACTIVE .*: a profile' -f "$(values 'extraEnv:' '  SPRING_PROFILES_ACTIVE: local')"
+          for name in SPRING_APPLICATION_JSON spring.application.json; do
+            must_refuse "config.$name" 'SPRING_APPLICATION_JSON|config.spring.application.json is not allowed' -f "$(values "  $name: '{\"spring\":{\"profiles\":{\"active\":\"local\"}}}'")"
+          done
+          for name in JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS JAVA_OPTS java.tool.options; do
+            must_refuse "config.$name with spring.profiles" 'startup TLS assertion|must not mention .*spring.profiles' -f "$(values "  $name: -Dspring.profiles.active=local")"
+            must_refuse "config.$name with SPRING_PROFILES" 'startup TLS assertion|must not mention .*spring.profiles' -f "$(values "  $name: -DSPRING_PROFILES_INCLUDE=local")"
+            must_refuse "extraEnv $name with spring.profiles" 'startup TLS assertion|must not mention .*spring.profiles' -f "$(values 'extraEnv:' "  - name: $name" '    value: -Dspring-profiles-active=local')"
+          done
+          # JVM options that do not touch profiles still render.
+          helm template ci "$chart" $common -f "$(values '  JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70')" > /dev/null
+          rm -rf "$work"
+          # The only profile setting in the rendered manifests is the chart's own SPRING_PROFILES_ACTIVE=aws.
+          got="$(grep -iE -A1 'SPRING[._-]?PROFILES' rendered.yaml | grep -v '^--$' || true)"
+          names="$(echo "$got" | grep -ciE 'SPRING[._-]?PROFILES' || true)"
+          wanted="$(echo "$got" | grep -cE '^[[:space:]]*- name: SPRING_PROFILES_ACTIVE$' || true)"
+          aws="$(echo "$got" | grep -cE '^[[:space:]]*value: "?aws"?$' || true)"
+          if [ "$names" -eq 0 ] || [ "$names" -ne "$wanted" ] || [ "$names" -ne "$aws" ]; then
+            echo "rendered profile settings must be the chart's own SPRING_PROFILES_ACTIVE=aws: $got"; exit 1
+          fi
+      - name: Vendored guard refuses on every adapter route, and interpolated keys and values stay in place
+        run: |
+          # README "Vendoring the guard" steps 2-4 (cicd-templates a4f0072): the adapter in
+          # deployment.yaml maps config, extraEnv (list or map form), envFrom, extraEnvFrom,
+          # databaseCa, kafka.runtime and the rendered ExternalSecrets (no env value of the templates is
+          # interpolated from values: all literals or secretKeyRefs); each
+          # case keeps the guard's message so it cannot pass because the render failed for another reason.
+          chart=deploy/helm/open-products-catalog-service
+          good='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
+          base="--set image.repository=ci/x --set image.tag=x --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=$good"
+          failed=0
+          must_fail() {  # <expected text in the error> <helm args...>
+            local expect="$1"; shift
+            if helm template ci "$chart" $base "$@" > /dev/null 2> guard.err; then
+              echo "chart rendered with: $*"; failed=1
+            elif ! grep -q -- "$expect" guard.err; then
+              echo "render failed for another reason than '$expect' with: $*"; cat guard.err; failed=1
+            fi
+          }
+          work="$(mktemp -d)"
+          # Template interpolation: a key with a newline would open further keys the checks never see.
+          printf 'config:\n  "X\\nSPRING_CONFIG_IMPORT": "optional:file:/tmp/x.yml"\n' > "$work/config-key-newline.yaml"
+          must_fail 'is not a ConfigMap key' -f "$work/config-key-newline.yaml"
+          printf 'config:\n  "X: y\\n  SPRING_DATASOURCE_URL": "x"\n' > "$work/config-key-colon.yaml"
+          must_fail 'is not a ConfigMap key' -f "$work/config-key-colon.yaml"
+          # The ExternalSecret remote keys come from values (--set-file outranks --set).
+          printf 'ci/x\n  property: x/db-app' > "$work/remote-key"
+          must_fail 'must not contain a control character' --set-file "externalSecret.remoteSecretName=$work/remote-key"
+          printf 'ci/x\n  property: x/db-migration' > "$work/remote-key"
+          must_fail 'must not contain a control character' --set-file "externalSecret.migrationRemoteSecretName=$work/remote-key"
+          # '$(' reaches no env value of the templates here; it is refused in DB_URL and extraEnv.
+          must_fail "config.DB_URL must not contain" --set-string "config.DB_URL=$good&ApplicationName=\$(X)" --set 'databaseUrlAllowedParams={ApplicationName}'
+          # Routes the chart does not render are refused rather than ignored.
+          must_fail 'envFrom is not supported' --set 'envFrom[0].configMapRef.name=x'
+          must_fail 'extraEnvFrom is not supported' --set 'extraEnvFrom[0].secretRef.name=x'
+          must_fail 'externalSecret.dataFrom is not supported' --set 'externalSecret.dataFrom[0].extract.key=x'
+          must_fail 'javaToolOptions is not supported' --set-string 'javaToolOptions=-XX:MaxRAMPercentage=70'
+          must_fail 'externalSecret.data is not supported' --set 'externalSecret.data[0].secretKey=X'
+          must_fail 'externalSecret.extraData is not supported' --set 'externalSecret.extraData[0].secretKey=X'
+          # No Kafka client (kafka.runtime ""): a Kafka protocol key in config fails the render.
+          must_fail 'config.KAFKA_SECURITY_PROTOCOL is set but kafka.runtime is empty' --set config.KAFKA_SECURITY_PROTOCOL=SSL
+          must_fail 'config.X_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM must be https' --set-string config.X_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM=
+          # Must pass: quoted values with a newline stay one value; no key or container field is added.
+          helm template ci "$chart" $base > "$work/baseline.yaml"
+          cat > "$work/hostile.yaml" <<'VALUES'
+          image:
+            tag: "x\"\n          args: [\"--spring.config.import=file:/tmp/x.yml\"]"
+          config:
+            OPEN_PRODUCTS_SEED_ENABLED: "aud\nSPRING_CONFIG_IMPORT: file:/tmp/x.yml"
+          databaseCaBundle:
+            configMapName: "rds-ca-bundle\n  optional: true"
+          VALUES
+          # --set outranks -f, so the hostile render takes image.tag from the file only.
+          helm template ci "$chart" ${base/--set image.tag=x/} -f "$work/hostile.yaml" > "$work/hostile-out.yaml"
+          python3 - "$work/baseline.yaml" "$work/hostile-out.yaml" <<'PY'
+          import sys, yaml
+          def load(p):
+              return {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(open(p)) if d}
+          base, bad = load(sys.argv[1]), load(sys.argv[2])
+          assert base.keys() == bad.keys(), "a hostile value added or removed a document"
+          for key, d in base.items():
+              if key[0] not in ("Deployment", "Job", "CronJob"):
+                  continue
+              pod = (lambda x: x["spec"]["jobTemplate"]["spec"]["template"]["spec"] if key[0] == "CronJob" else x["spec"]["template"]["spec"])
+              spec, other = pod(d), pod(bad[key])
+              assert spec.keys() == other.keys(), f"{key}: pod spec fields changed"
+              for c, o in zip(spec.get("initContainers", []) + spec["containers"], other.get("initContainers", []) + other["containers"]):
+                  assert c.keys() == o.keys(), f"{key}: container fields changed: {sorted(set(o) ^ set(c))}"
+                  assert [e["name"] for e in c.get("env", [])] == [e["name"] for e in o.get("env", [])], f"{key}: env names changed"
+                  assert o["image"].startswith("ci/x:x\"\n"), f"{key}: image tag not kept as one value"
+              vols = {v["name"]: v for v in other["volumes"]}
+              assert vols["rds-ca-bundle"]["configMap"].keys() == {"name", "items"}, f"{key}: configMap volume fields changed"
+          cm = next(d for (k, _), d in bad.items() if k == "ConfigMap")
+          cm0 = next(d for (k, _), d in base.items() if k == "ConfigMap")
+          assert cm["data"].keys() == cm0["data"].keys(), "ConfigMap keys changed"
+          assert cm["data"]["OPEN_PRODUCTS_SEED_ENABLED"] == "aud\nSPRING_CONFIG_IMPORT: file:/tmp/x.yml", "config value not kept as one value"
+          print("hostile values stay single quoted values: no added keys, env entries or container fields")
+          PY
+          rm -rf "$work" guard.err
+          exit $failed
+      - name: The chart renders the deployment marker FBX_DEPLOYED=true on every container that runs the TLS check
+        run: |
+          # DatabaseTlsEnvironmentPostProcessor enforces with FBX_DEPLOYED whatever the profiles (aws
+          # required, no local, test or in-memory profile): migrate, the service, the history guard
+          # CronJob and the release gate Job. Rendered directly, never from values.
+          chart=deploy/helm/open-products-catalog-service
+          for np in false true; do
+            helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+              --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+              --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' \
+              --set networkPolicy.enabled=$np --set "networkPolicy.databaseCidrs={10.0.32.0/20}" > marker.yaml
+            python3 - marker.yaml "CronJob/history-guard-check,Deployment/migrate,Deployment/open-products-catalog-service,Job/history-guard-check" <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+          want = set(sys.argv[2].split(","))
+          containers = []
+          for d in docs:
+              spec = None
+              if d["kind"] in ("Deployment", "Job"):
+                  spec = d["spec"]["template"]["spec"]
+              elif d["kind"] == "CronJob":
+                  spec = d["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+              if spec:
+                  containers += [(f"{d['kind']}/{c['name']}", c) for c in spec.get("initContainers", []) + spec["containers"]]
+          assert {w for w, _ in containers} == want, f"expected containers {sorted(want)}, got {sorted(w for w, _ in containers)}"
+          for where, c in containers:
+              env = [e for e in c.get("env", []) if e["name"] == "FBX_DEPLOYED"]
+              assert env == [{"name": "FBX_DEPLOYED", "value": "true"}], f"{where} must set FBX_DEPLOYED=true once, as a literal, got {env}"
+          for cm in (d for d in docs if d["kind"] == "ConfigMap"):
+              assert not [k for k in (cm.get("data") or {}) if "".join(ch for ch in k.upper() if ch.isalnum()) == "FBXDEPLOYED"], \
+                  f"ConfigMap {cm['metadata']['name']} must not carry FBX_DEPLOYED"
+          print("FBX_DEPLOYED=true on " + ", ".join(sorted(w for w, _ in containers)))
+          PY
+          done
+          rm -f marker.yaml
+      - name: Every database client container trusts the platform RDS CA bundle
+        run: |
+          # ConfigMap rds-ca-bundle (key global-bundle.pem), published by trust-manager (platform contract).
+          # migrate, the service, the history guard CronJob and the release gate Job.
+          grep -q "name: rds-ca-bundle$" rendered.yaml
+          test "$(grep -c 'mountPath: "/etc/fintechbankx/rds-ca"$' rendered.yaml)" -eq 4
+      - name: App pods and every selector carry app.kubernetes.io/component=service
+        run: |
+          # cicd-templates 335a345: component=service keeps Service, PDB, NetworkPolicy,
+          # topology spread and the Deployment selector on the serving pods only.
+          python3 - rendered.yaml <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+          def need(labels, where):
+              if (labels or {}).get("app.kubernetes.io/component") != "service":
+                  sys.exit(f"{where} lacks app.kubernetes.io/component=service: {labels}")
+          seen = set()
+          for d in docs:
+              kind, spec = d["kind"], d.get("spec", {})
+              seen.add(kind)
+              if kind == "Deployment":
+                  need(spec["selector"]["matchLabels"], "Deployment selector")
+                  need(spec["template"]["metadata"]["labels"], "app pod labels")
+                  for c in spec["template"]["spec"].get("topologySpreadConstraints", []):
+                      need(c["labelSelector"]["matchLabels"], "topology spread selector")
+              elif kind == "Service":
+                  need(spec["selector"], "Service selector")
+              elif kind == "PodDisruptionBudget":
+                  need(spec["selector"]["matchLabels"], "PodDisruptionBudget selector")
+              elif kind == "NetworkPolicy":
+                  need(spec["podSelector"]["matchLabels"], "NetworkPolicy podSelector")
+          missing = {"Deployment", "Service", "PodDisruptionBudget", "NetworkPolicy"} - seen
+          if missing:
+              sys.exit(f"rendered.yaml has no {sorted(missing)}")
+          print("component=service on the app pods and every selector")
+          PY
+      - name: Every container runs under the aws profile, and the history guard check is scheduled and gates upgrades
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          cat > guard-check.py <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+          break_glass = sys.argv[2] if len(sys.argv) > 2 else ""
+          def env(c):
+              return {e["name"]: e.get("value") for e in c.get("env", [])}
+          def fail(msg):
+              sys.exit(msg)
+          deploy = next(d for d in docs if d["kind"] == "Deployment")
+          pod = deploy["spec"]["template"]["spec"]
+          for c in pod.get("initContainers", []) + pod["containers"]:
+              if env(c).get("SPRING_PROFILES_ACTIVE") != "aws":
+                  fail(f"container {c['name']} does not run under SPRING_PROFILES_ACTIVE=aws (startup TLS check)")
+          def check_pod(kind, tpl):
+              labels = tpl["metadata"]["labels"]
+              if labels.get("app.kubernetes.io/component") != "history-guard-check":
+                  fail(f"{kind} pods must carry app.kubernetes.io/component=history-guard-check: {labels}")
+              if str(labels.get("sidecar.istio.io/inject")) != "false":
+                  fail(f"{kind} pods must not get a sidecar (a Job with a sidecar never completes)")
+              spec = tpl["spec"]
+              if spec.get("restartPolicy") != "Never":
+                  fail(f"{kind} pods must not restart: one run, one answer")
+              (c,) = spec["containers"]
+              e = env(c)
+              want = {"OPEN_PRODUCTS_HISTORY_GUARD_CHECK": "true", "SPRING_PROFILES_ACTIVE": "aws",
+                      "SPRING_FLYWAY_ENABLED": "false", "SPRING_MAIN_WEB_APPLICATION_TYPE": "none"}
+              for k, v in want.items():
+                  if e.get(k) != v:
+                      fail(f"{kind} container env {k} must be {v}, got {e.get(k)}")
+              secrets = [s["secretRef"]["name"] for s in c.get("envFrom", []) if "secretRef" in s]
+              if secrets != ["open-products-catalog-service-db"]:
+                  fail(f"{kind} must use the runtime credential only (db-app), got {secrets}")
+              if not any(m["mountPath"] == "/etc/fintechbankx/rds-ca" for m in c.get("volumeMounts", [])):
+                  fail(f"{kind} must mount the RDS CA bundle")
+          crons = [d for d in docs if d["kind"] == "CronJob"]
+          if len(crons) != 1 or not crons[0]["spec"].get("schedule"):
+              fail("expected one scheduled history guard check CronJob")
+          check_pod("CronJob", crons[0]["spec"]["jobTemplate"]["spec"]["template"])
+          hooks = [d for d in docs if d["kind"] == "Job"]
+          if break_glass:
+              if hooks:
+                  fail("a break-glass release must not render the release gate")
+              if deploy["metadata"].get("annotations", {}).get("fintechbankx.io/history-guard-break-glass") != break_glass:
+                  fail("a break-glass release must record its ticket on the Deployment")
+          else:
+              if len(hooks) != 1:
+                  fail("expected one release-gate Job")
+              ann = hooks[0]["metadata"].get("annotations", {})
+              if ann.get("helm.sh/hook") != "pre-upgrade":
+                  fail(f"the release gate must be a pre-upgrade hook only (the guard is armed after the first install), got {ann.get('helm.sh/hook')}")
+              if hooks[0]["spec"].get("backoffLimit") != 0:
+                  fail("the release gate must not retry")
+              check_pod("release gate Job", hooks[0]["spec"]["template"])
+          print("aws profile on every container; history guard check scheduled" + ("; release gate skipped for " + break_glass if break_glass else " and gating upgrades"))
+          PY
+          python3 guard-check.py rendered.yaml
+          helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+            --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' \
+            --set historyGuardCheck.breakGlassTicket=CHG-0001 > break-glass.yaml
+          python3 guard-check.py break-glass.yaml CHG-0001
+          rm -f guard-check.py break-glass.yaml
+      - name: History guard check pods keep the mesh egress labels, and the CronJob is never suspended
+        run: |
+          # Mesh d2ccacc selects the check pods' Aurora egress on app.kubernetes.io/name and
+          # app.kubernetes.io/component, so both stay on the CronJob's and the gate Job's pod templates.
+          # The CronJob is never suspended: no spec.suspend is rendered and no value can set one.
+          chart=deploy/helm/open-products-catalog-service
+          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          common="$common --set config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
+          for extra in "" "-f $chart/values-dev.yaml"; do
+            helm template ci "$chart" $common $extra > history-guard-check.yaml
+            python3 - history-guard-check.yaml <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+          want = {"app.kubernetes.io/name": "open-products-catalog-service",
+                  "app.kubernetes.io/component": "history-guard-check"}
+          cron = [d for d in docs if d["kind"] == "CronJob"]
+          gate = [d for d in docs if d["kind"] == "Job" and d["metadata"]["name"].endswith("-history-guard-gate")]
+          assert len(cron) == 1 and len(gate) == 1, f"expected one CronJob and one gate Job, got {len(cron)} and {len(gate)}"
+          pods = {"CronJob": cron[0]["spec"]["jobTemplate"]["spec"]["template"], "gate Job": gate[0]["spec"]["template"]}
+          for where, pod in pods.items():
+              labels = pod["metadata"].get("labels") or {}
+              for key, value in want.items():
+                  assert labels.get(key) == value, f"{where} pod must carry {key}={value} (mesh egress selector), got {labels.get(key)!r}"
+          assert cron[0]["spec"].get("suspend") in (None, False), f"CronJob must not be suspended, got suspend={cron[0]['spec'].get('suspend')!r}"
+          print("history guard check pods carry name and component; CronJob not suspended")
+          PY
+          done
+          if grep -rn "suspend" "$chart/templates" "$chart"/values*.yaml; then
+            echo "no template or value may set the history guard CronJob's spec.suspend"; exit 1
+          fi
+          rm -f history-guard-check.yaml
+      - name: Rendered ConfigMap has no empty or identity-provider keys
+        run: |
+          if grep -nE '^  OIDC_|: ""$' rendered.yaml; then
+            echo "ConfigMap renders OIDC_* or empty values"
+            exit 1
+          fi
+
+  terraform:
+    name: deploy/terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+      - name: Plan-only tests with mocked providers (database access rules)
+        run: terraform test
+
+  data-migration:
+    name: deploy/data-migration-rehearsal
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rehearsal
+          POSTGRES_PASSWORD: rehearsal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rehearsal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: rehearsal
+      PGPASSWORD: rehearsal
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rehearse schema migration, dev seed and idempotent catalogue import
+        run: scripts/migration/verify-migration.sh
