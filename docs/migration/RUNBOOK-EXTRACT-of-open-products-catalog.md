@@ -20,7 +20,7 @@ Extraction of the product catalogue from `enterprise-loan-management-system`
 | `productcatalog` in-memory TTL cache | dropped | replaced by HTTP caching (ETag, Cache-Control) |
 | Product SQL tables | none exist | no monolith migration creates one, so there is nothing to backfill |
 | `sc_of_open_products_catalog.product` | this service | Flyway `V1__create_product_catalogue.sql` |
-| `sc_of_open_products_catalog.product_history` | this service | Flyway `V2__product_history_and_roles.sql` (append-only audit trail), `V3` (operator identity), `V4` (written only by its trigger; product deletes recorded) |
+| `sc_of_open_products_catalog.product_history` | this service | Flyway `V2__product_history_and_roles.sql` (append-only audit trail), `V3` (operator identity), `V4` (written only by its trigger; product deletes recorded), `V5` (TRUNCATE of `product` refused; only the history writer inserts) |
 
 The service never reads monolith tables; nothing else reads `sc_of_open_products_catalog`.
 
@@ -41,10 +41,15 @@ migration; since V3 also `operator_arn`, the importing operator's AWS caller
 identity). The runtime and import roles cannot update or delete history rows.
 The schema owner, which owns the table and its trigger functions, is stopped
 by the history guard (`db/bootstrap/history-guard.sql`): admin-owned event
-triggers that refuse any DDL on the history table, its two functions or its
-triggers once armed. Refusals, disarming and any DDL that reaches those
-objects (pgaudit) raise the `<env>-open-products-catalog-service-history-tamper`
-alarm (ADR-0001, section 2.3).
+triggers that, once armed, refuse any DDL on the history table, its
+functions or the triggers on either table. They also refuse any table that
+inherits from `product` or `product_history`, or takes either as a
+partition. A child's rows are read through its parent without its triggers
+firing, so a child would carry forged history or products without history.
+The service also reads `ONLY product`. Refusals, disarming and any DDL that
+reaches those objects (pgaudit) raise the
+`<env>-open-products-catalog-service-history-tamper` alarm (ADR-0001, section
+2.3).
 
 ### 2.1 Where operator database work runs
 
@@ -171,10 +176,14 @@ production import window (step 2's `\password`, then `put-secret-value`).
    bootstrap), in the same session. On Aurora, `rds_superuser` can
    `GRANT r TO x WITH INHERIT TRUE, SET TRUE` only for roles it holds ADMIN
    OPTION on, which means roles it created or holds `WITH ADMIN`. `arm()`
-   needs exactly that for the owner and the writer. Do not create them with
-   another login, and do not assume the admin can grant a role it does not
-   administer (platform, round 3; *to be verified in the terraform-modules
-   Aurora 16 drill*).
+   needs exactly that for the owner and the writer. It grants the two
+   memberships to the admin only for the transfer and revokes them before it
+   returns, so the admin keeps ADMIN OPTION only and cannot `SET ROLE` to
+   the writer. `arm()` refuses while any role can act as the writer. Do not
+   create the roles with another login, and do not assume the admin can grant
+   a role it does not administer (platform, round 3). The rehearsal runs this
+   path as a non-superuser CREATEROLE role on PostgreSQL 16; on Aurora it is
+   *to be verified in the terraform-modules Aurora 16 drill*.
 
    Object audit: terraform-modules #11 creates only the `rds_pgaudit` role and
    sets `pgaudit.role`. It grants nothing on any table. The guard issues the
@@ -196,9 +205,19 @@ production import window (step 2's `\password`, then `put-secret-value`).
    `externalSecret.migrationRemoteSecretName` (db-migration) and
    `config.DB_URL` from the Terraform output `jdbc_url`
    (`sslmode=verify-full`, `sslrootcert` on the mounted `rds-ca-bundle`; the
-   chart refuses any other URL). The `migrate` init
+   chart refuses any other URL). Every container runs under the `aws`
+   profile, and under it the service also refuses to start with any other
+   URL. The chart refuses Spring config locations (`spring.config.import`,
+   `.location`, `.additional-location`, `SPRING_APPLICATION_JSON`) in
+   `config` and any `extraEnv`. The `migrate` init
    container runs Flyway as the owner and exits; the service then starts with
-   the runtime role and Flyway disabled. Check:
+   the runtime role and Flyway disabled. The pods are selected by
+   `app.kubernetes.io/name`, `instance` and `component=service`. The
+   Deployment selector is immutable. No release is installed yet, so the
+   first install creates it with the component label. A release installed
+   before round 5 would have to be deleted and installed again. The history
+   guard check CronJob (section 2.3) also starts at install and fails
+   until the guard is armed below. Check:
    `SELECT grantee, privilege_type FROM information_schema.role_table_grants WHERE table_schema = 'sc_of_open_products_catalog' ORDER BY 1, 2;`
    Then the admin arms the history guard, from the operator host:
    `SELECT fbx_history_guard.arm('<change ticket>: first deploy');` must
@@ -229,22 +248,47 @@ Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migratio
 - **Integrity check**: `SELECT fbx_history_guard.verify();` (any role) must
   return `armed, intact`. Any other answer is an incident: `DISARMED`,
   `CHANGED SINCE ARMED`, `EVENT TRIGGERS MISSING OR DISABLED` or
-  `GUARD STATE NOT APPEND-ONLY`. The check must run on a schedule (a
-  Kubernetes CronJob or an application metric with an alert). It pages on any
-  answer other than `armed, intact` and blocks releases: nothing is promoted
-  to an environment whose last check failed, and an incident is opened. It
-  also runs after every release and before each catalogue import. The
-  rehearsal checks it too, plus `pg_trigger.tgenabled` (all six history
-  triggers `A`, ALWAYS) and `md5(prosrc)` of the history functions. The
-  scheduled check is **not built yet**. It is a go-live item owned by the
-  Open Data Squad (section 3).
+  `GUARD STATE NOT APPEND-ONLY`. It pages on any answer other than
+  `armed, intact` and blocks releases: nothing is promoted to an
+  environment whose last check failed, and an incident is opened. Run it by
+  hand after every release and before each catalogue import. The rehearsal
+  checks it too, plus `pg_trigger.tgenabled` (all six history triggers `A`,
+  ALWAYS) and `md5(prosrc)` of the history functions.
+- **Scheduled check and release gate** (built in round 5, not yet run in a
+  cluster): the chart runs the service image in check mode
+  (`OPEN_PRODUCTS_HISTORY_GUARD_CHECK=true`). It calls `verify()` as the
+  runtime role, with the `db-app` credential and verified TLS, and exits
+  non-zero unless the answer is `armed, intact`. It runs in two places:
+  - CronJob `open-products-catalog-service-history-guard-check`, every 15
+    minutes (`historyGuardCheck.schedule`). A failed Job pages through the
+    platform's job-failure alert for the namespace. That alert is a platform
+    dependency (section 3).
+  - Job `open-products-catalog-service-history-guard-gate`, a Helm
+    `pre-upgrade` hook. If the check fails, `helm upgrade` fails before
+    anything is applied, and the failed Job stays for inspection. It is not a
+    `pre-install` hook, because the guard is armed after the first install.
+
+  Why this mechanism: it is the most reversible one that can reach the
+  database. It is one chart template and one check mode in the service. It
+  needs no new image, credential, IAM role, network path or Terraform, and
+  a revert or `helm rollback` removes it. A CI or Deployability step cannot
+  do the job, because GitHub runners have no path to Aurora (section 2.1).
+  A Terraform scheduled task would need its own IAM role, network access
+  and secret wiring. The Deployability `deploy/helm` job checks the rendered
+  CronJob and gate: the `aws` profile, the runtime credential only, the CA
+  bundle, no sidecar, no retry, and no app selector matching their pods.
+  `OpenProductsPostgresIT` proves the check fails against the real guard
+  when it is disarmed or changed.
 - **Releases**: migrations that do not touch `product_history`, its
   functions (`product_history_record`, `product_history_append_only`,
   `product_history_insert_guard`, `product_truncate_refused`), any trigger on
   `product` or `product_history`, the privileges on either table or
   `fbx_history_guard` run with the guard armed. A migration that does touch
-  one of these is refused, so the `migrate` init container fails and the
-  rollout stops with the old pods serving (`maxUnavailable: 0`). The
+  one of these, or makes a table inherit from or partition either table, is
+  refused, so the `migrate` init container fails and the rollout stops with
+  the old pods serving (`maxUnavailable: 0`). An upgrade of an environment
+  whose guard is not `armed, intact` stops earlier, at the pre-upgrade
+  gate. The
   history-tamper alarm (section 2, Terraform) pages on arm, on disarm and on
   every Flyway release whose DDL names `product_history` or
   `fbx_history_guard`. This is by design: such a release only happens under a
@@ -256,7 +300,11 @@ Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migratio
   2. `SELECT fbx_history_guard.hand_back_history_writer('<ticket>');`, **only
      if** the migration replaces `product_history_record()`. It gives the
      function and INSERT back to the schema owner, which Flyway runs as.
-  3. Deploy, then check the history objects.
+  3. Deploy with `--set historyGuardCheck.breakGlassTicket=<ticket>`. This
+     skips the pre-upgrade gate for this release only, which would otherwise
+     refuse because the guard is disarmed, and records the ticket on the
+     Deployment. The CronJob keeps paging until step 4. Then check the
+     history objects.
   4. `SELECT fbx_history_guard.arm('<ticket>');` moves the writer back,
      clears the owner's INSERT (column grants included) and records the new
      state.
@@ -269,7 +317,19 @@ Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migratio
 - **Upgrade of an armed environment to round 3** (V5 and the new
   bootstrap): disarm, deploy V5, re-run `db/bootstrap/history-guard.sql`,
   then arm. No hand-back is needed. The round-2 `fbx_history_guard.armed`
-  table is kept as `armed_v1`. No environment is armed today, because
+  table is kept as `armed_v1`.
+- **Upgrade of an armed environment to round 5** (new bootstrap only, no
+  migration): `SELECT fbx_history_guard.disarm('<ticket>');`, re-run
+  `db/bootstrap/history-guard.sql`, then
+  `SELECT fbx_history_guard.arm('<ticket>');`, which must return
+  `armed, intact`. The fingerprint now also covers inheritance, so the old
+  recorded fingerprint does not match the new formula. The bootstrap refuses
+  to run while armed. `arm()` refuses if a table inherits from `product` or
+  `product_history`; detach or drop it first, then `ANALYZE` the parent to
+  clear `relhassubclass`. On a non-superuser admin, the new `arm()` also
+  revokes the writer and owner memberships a round-3 `arm()` left. `armed`,
+  `event` and `armed_v1` are kept. This was rehearsed locally from the
+  round-2 and round-3 bootstraps. No environment is armed today, because
   nothing is deployed; the first deploy follows section 2.2.
 - **Replica mode**: on Aurora 16, `rds_superuser` can set
   `session_replication_role = replica` without any DDL. That is documented,
@@ -311,19 +371,31 @@ service, not returning traffic to the monolith.
 - The operator host or in-VPC CI agent, with its security group in
   `operator_security_group_ids` (section 2.1).
 - The DBA bootstrap in section 2 (three roles) done before the first deploy.
-- A scheduled history-guard integrity check (`fbx_history_guard.verify()` must
-  return `armed, intact`), as a Kubernetes CronJob or an application metric
-  with an alert. It is a **release blocker**: it pages on any other answer,
-  nothing is promoted to an environment whose last check failed, and an
-  incident is opened (section 2.3). Owner: Open Data Squad. Not built yet.
+- The scheduled history-guard integrity check (`fbx_history_guard.verify()`
+  must return `armed, intact`) is a **release blocker**. The chart's CronJob
+  and pre-upgrade gate (section 2.3) are built, but they page only through
+  the platform's job-failure alert for the `open-finance` namespace
+  (kube-state-metrics `kube_job_status_failed`), which the platform must
+  route to the Open Data Squad. If a namespace default-deny is in place, the
+  check pods need the same Aurora egress as the service. They share its
+  `app.kubernetes.io/name` and service account but run without a sidecar.
+  Owner: Open Data Squad; the alert routing is a platform dependency.
 - The guard armed in each environment right after its first deploy (section
   2.2, step 3). An environment armed before round 3 is upgraded with disarm,
   V5, bootstrap, arm (section 2.3). No environment is armed today, because
   nothing is deployed.
-- The terraform-modules Aurora 16 drill: `rds_superuser` grants on the roles
-  it created, `session_replication_role` refused by the ALWAYS triggers, and
-  `AUDIT: OBJECT` lines from the guard's `rds_pgaudit` grants. All three are
-  unverified on a real instance.
+- The terraform-modules Aurora 16 drill (tell platform about the new item):
+  - `rds_superuser` grants on the roles it created;
+  - `session_replication_role` refused by the ALWAYS triggers;
+  - `AUDIT: OBJECT` lines from the guard's `rds_pgaudit` grants;
+  - new in round 5: `arm()` and hand-back as `rds_superuser` (a
+    non-superuser) leave it with ADMIN OPTION only on the owner and the
+    writer, `SET ROLE open_products_catalog_history_writer` is refused
+    afterwards, and the guard's catalog lookups work without USAGE on the
+    service schema.
+
+  All four are unverified on a real instance. The last is rehearsed on
+  PostgreSQL 16 with a non-superuser CREATEROLE role.
 
 **Steps**
 
@@ -370,8 +442,11 @@ service, not returning traffic to the monolith.
 
 ## 4. Verification
 
-- `./gradlew check` with `TEST_DB_URL` set: Flyway, Hibernate validation, seed,
-  filtering, effective-window rules and ETag revalidation against PostgreSQL.
+- `./gradlew check` with `TEST_DB_URL` set (a superuser login, as in CI: the
+  tests create roles and install the history guard's event triggers from
+  `db/bootstrap/history-guard.sql`): Flyway, Hibernate validation, seed,
+  filtering, effective-window rules, ETag revalidation, the guard's
+  inheritance refusals and the history guard check against PostgreSQL.
 - `GET /actuator/health/readiness` on 8081 is `UP` (includes `db`).
 - Product count per status after import:
   `SELECT status, count(*) FROM sc_of_open_products_catalog.product GROUP BY status;`
@@ -383,8 +458,9 @@ service, not returning traffic to the monolith.
 - [x] Idempotent catalogue import rehearsed in CI
 - [x] Container image, Helm chart, Terraform checked in the Deployability workflow
 - [ ] Real catalogue CSV signed off by the product owner
-- [ ] Scheduled history-guard integrity check (CronJob or app metric, alerting; owner: Open Data Squad); a failed `verify()` blocks every release to that environment
+- [x] Scheduled history-guard integrity check built: chart CronJob plus pre-upgrade release gate (section 2.3); proved red against a disarmed or changed guard in `OpenProductsPostgresIT`
+- [ ] The check running and paging in each environment (platform job-failure alert routed to the Open Data Squad); a failed `verify()` blocks every release to that environment
 - [ ] Guard armed after the first deploy in each environment (`verify()` returns `armed, intact`); none armed today, nothing is deployed
-- [ ] terraform-modules Aurora 16 drill: role grants by `rds_superuser`, replica-mode refusal, pgaudit object audit
+- [ ] terraform-modules Aurora 16 drill: role grants by `rds_superuser`, replica-mode refusal, pgaudit object audit, no writer membership left after `arm()` by `rds_superuser`
 - [ ] Gateway route switched (platform)
 - [ ] Monolith `productcatalog` controller removed (enterprise-loan-management-system)
