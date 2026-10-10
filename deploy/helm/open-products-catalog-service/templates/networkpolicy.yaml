@@ -5,7 +5,12 @@
 {{- /* Floor: IPv4 /8, IPv6 /32. Anything broader (e.g. two /1 halves) would open
        PostgreSQL egress to the internet as /0 does; list the Aurora subnets only. */}}
 {{- range .Values.networkPolicy.databaseCidrs }}
-{{- $cidr := toString . | trim }}
+{{- $cidr := toString . }}
+{{- /* Rendered as given, so it must already be canonical: Kubernetes (Go net.ParseCIDR)
+       refuses spaces and leading zeros in an octet or the prefix. */}}
+{{- if or (ne $cidr (trim $cidr)) (contains " " $cidr) (regexMatch "(^|[./])0[0-9]" $cidr) }}
+{{- fail (printf "networkPolicy.databaseCidrs entry %q is not canonical: no spaces and no leading zeros in an octet or the prefix; list the Aurora subnets' CIDRs only" $cidr) }}
+{{- end }}
 {{- $parts := splitList "/" $cidr }}
 {{- $floor := ternary 32 8 (contains ":" $cidr) }}
 {{- if or (ne (len $parts) 2) (not (regexMatch "^[0-9]{1,3}$" (last $parts))) (lt (atoi (last $parts)) $floor) }}
