@@ -574,6 +574,14 @@ psql_q -d "$db" -c "ANALYZE $schema.product_history"
 psql_q -d "$db" -v schema="$schema" -f "$root/db/bootstrap/history-guard.sql" > /dev/null
 check "the bootstrap re-runs while disarmed and keeps the guard state" \
   "SELECT fbx_history_guard.verify() || ':' || (SELECT string_agg(action, ',' ORDER BY event_id) FROM fbx_history_guard.event)" "DISARMED:arm,disarm"
+# Nobody may be able to act as the writer when the guard is armed.
+psql_q -d "$db" -c "GRANT $writer TO $owner WITH INHERIT FALSE, SET TRUE"
+if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SELECT fbx_history_guard.arm('rehearsal: writer has a member')" 2> "$work/arm.err"; then
+  echo "FAIL arm() armed while the owner could SET ROLE to the writer" >&2; exit 1
+fi
+grep -q "cannot arm, $owner (granted by [a-z_]*) can act as $writer" "$work/arm.err" || { cat "$work/arm.err" >&2; exit 1; }
+echo "ok   arm() refuses while any role can act as the history writer"
+psql_q -d "$db" -c "REVOKE $writer FROM $owner"
 psql_q -d "$db" -c "SELECT fbx_history_guard.hand_back_history_writer('rehearsal: migration replaces the recording function')" > /dev/null 2> "$work/handback.err"
 grep -q "WARNING:  product_history guard: history writer HANDED BACK" "$work/handback.err" || { cat "$work/handback.err" >&2; exit 1; }
 check "hand-back returns the function and INSERT to the owner" \
@@ -656,7 +664,7 @@ check "the writer has no INHERIT or SET member after arm()" \
   "SELECT count(*) FROM pg_auth_members WHERE roleid = '$writer'::regrole AND (inherit_option OR set_option)" "0"
 check "the admin keeps only ADMIN OPTION on the owner and the writer" \
   "SELECT string_agg(roleid::regrole || ':' || admin_option || ':' || inherit_option || ':' || set_option, ',' ORDER BY roleid::regrole::text) FROM pg_auth_members WHERE member = '$admin'::regrole" \
-  "$owner:true:false:false,$writer:true:false:false"
+  "$writer:true:false:false,$owner:true:false:false"
 # ADMIN OPTION lets the admin grant itself the writer again: not prevented, but verify() reports it.
 as_admin psql_q -d "$db" -c "GRANT $writer TO $admin WITH INHERIT FALSE, SET TRUE"
 check "the admin re-granting itself the writer is reported" "SELECT fbx_history_guard.verify()" "CHANGED SINCE ARMED"

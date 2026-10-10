@@ -11,7 +11,9 @@
 --    both objects as the schema owner, so arm() (after migrate) moves them;
 --    the owner keeps no INSERT and no EXECUTE, cannot attach the function to
 --    another table, replace it or take it back. V5's insert guard also
---    refuses any insert not made as the function's owner.
+--    refuses any insert not made as the function's owner. Nobody is a
+--    member of the writer with INHERIT or SET: a non-superuser admin gets
+--    both only for the transfer, and arm() refuses otherwise.
 -- 2. The event triggers (admin-owned). Once armed, any DDL in the database
 --    that targets or drops a protected object (the history table, its
 --    functions, every trigger on product or product_history and the
@@ -371,6 +373,7 @@ DECLARE
     s      text := (SELECT schema_name FROM fbx_history_guard.settings);
     writer text := 'open_products_catalog_history_writer';
     owner  text;
+    temporary boolean;
 BEGIN
     SELECT pg_get_userbyid(c.relowner) INTO owner
       FROM pg_class c WHERE c.oid = fbx_history_guard.table_oid('product_history');
@@ -378,8 +381,12 @@ BEGIN
         RAISE EXCEPTION 'product_history guard: %.product_history does not exist (deploy first)', s;
     END IF;
     -- A non-superuser admin (rds_superuser) must own the function through
-    -- membership (INHERIT) and be able to SET ROLE to the new owner.
-    IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+    -- membership (INHERIT) and be able to SET ROLE to the new owner. It
+    -- holds these memberships only for the transfer: they are revoked
+    -- before this function returns (review 5), so the admin is never left
+    -- a member that can act as the writer.
+    temporary := NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user);
+    IF temporary THEN
         EXECUTE format('GRANT %I TO %I WITH INHERIT TRUE, SET TRUE', owner, current_user);
         EXECUTE format('GRANT %I TO %I WITH INHERIT TRUE, SET TRUE', writer, current_user);
     END IF;
@@ -405,6 +412,12 @@ BEGIN
         EXECUTE format('REVOKE ALL ON FUNCTION %I.product_history_record() FROM PUBLIC', s);
         EXECUTE format('GRANT INSERT ON %I.product_history TO %I', s, owner);
         EXECUTE format('REVOKE INSERT ON %I.product_history FROM %I', s, writer);
+    END IF;
+    IF temporary THEN
+        -- Removes the grants made above (and any earlier one the admin made
+        -- to itself, as round 3 left them); the creator's ADMIN OPTION stays.
+        EXECUTE format('REVOKE %I FROM %I', writer, current_user);
+        EXECUTE format('REVOKE %I FROM %I', owner, current_user);
     END IF;
 END
 $$;
@@ -432,6 +445,16 @@ BEGIN
     END IF;
     -- Still disarmed here, so the guard does not refuse the transfer's DDL.
     PERFORM fbx_history_guard.set_history_writer(true);
+    -- Nobody may act as the writer: no member with INHERIT or SET (an
+    -- ADMIN OPTION alone, as the role's creator holds it, cannot).
+    IF EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
+                WHERE r.rolname = 'open_products_catalog_history_writer' AND (m.inherit_option OR m.set_option)) THEN
+        RAISE EXCEPTION 'product_history guard: cannot arm, % can act as open_products_catalog_history_writer',
+            (SELECT string_agg(format('%s (granted by %s)', m.member::regrole, m.grantor::regrole), ', ')
+               FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
+              WHERE r.rolname = 'open_products_catalog_history_writer' AND (m.inherit_option OR m.set_option))
+            USING HINT = 'REVOKE open_products_catalog_history_writer FROM <member> GRANTED BY <grantor>, then arm.';
+    END IF;
     SELECT * INTO cur FROM fbx_history_guard.current_state();
     INSERT INTO fbx_history_guard.event (action, reason) VALUES ('arm', reason);
     INSERT INTO fbx_history_guard.armed (is_armed, protected_oids, fingerprint)
