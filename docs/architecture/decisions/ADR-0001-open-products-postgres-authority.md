@@ -85,39 +85,92 @@ So there is **no monolith catalogue data to backfill**.
   - The runtime and import roles have no privilege on `product_history`;
     `UPDATE`, `DELETE` and `TRUNCATE` of it are rejected by triggers, also
     for the schema owner.
-  - Only the history trigger on `product` writes `product_history` (V4): a
-    direct insert is refused for every role, including the owner and a
-    superuser (`pg_trigger_depth()`). Deleting a product writes a `DELETE`
-    row with the old values (V4); tested with a delete by the owner.
-  - The schema owner's DDL on the history is **prevented** while the history
-    guard (`db/bootstrap/history-guard.sql`, admin-owned event triggers
-    installed by the DBA bootstrap, not by Flyway) is armed. Twenty-one probes
-    run as the owner are refused, including the review's three (replacing
+  - Only the NOLOGIN history writer (`open_products_catalog_history_writer`)
+    may insert into `product_history`. The bootstrap creates it as the
+    admin, and `arm()` gives it `product_history_record()` (SECURITY DEFINER)
+    and the only INSERT on the history. The schema owner then holds no INSERT
+    (column grants included) and no EXECUTE on the function, so it cannot
+    replace the function, take it back, attach it to another table or become
+    the writer. V4's insert guard refuses any insert that does not come from a
+    trigger (`pg_trigger_depth()`). V5 adds a check of the inserting role: it
+    must be the owner of `product_history_record()`. A trigger on any other
+    table, a superuser's included, is refused. Before `arm()` the owner of
+    the function is the schema owner (local, CI, first deploy).
+  - TRUNCATE of `product` is refused for every role, the admin included
+    (V5): it fires no row trigger and would remove products without history.
+    Deleting a product writes a `DELETE` row with the old values (V4); the
+    rehearsal clears rows with `DELETE` and checks each removal is recorded.
+  - All six history triggers fire ALWAYS (V5), also under
+    `session_replication_role = replica`, which a superuser or
+    `rds_superuser` can set without DDL. TRUNCATE, history inserts and
+    guard-state rewrites are refused in replica mode on PostgreSQL 16. On
+    Aurora 16 this is *to be verified in the terraform-modules Aurora 16
+    drill*.
+  - The schema owner's DDL and grants on the history are **prevented** while
+    the history guard (`db/bootstrap/history-guard.sql`, admin-owned event
+    triggers installed by the DBA bootstrap, not by Flyway) is armed. The
+    guard refuses any DDL that targets or drops a protected object, or that
+    leaves a different fingerprint from the one recorded at arming. The
+    fingerprint covers:
+    - table and column privileges (`relacl`, `pg_attribute.attacl`) of
+      `product` and `product_history`;
+    - owner, ACL, SECURITY DEFINER, `search_path` and body of every function
+      a protected trigger calls;
+    - the history triggers and their enabled state, the history columns and
+      rules;
+    - the writer's attributes and members, and `rds_pgaudit` membership
+      (GRANT ROLE fires no event trigger, so `verify()` reports it).
+
+    Thirty-two statements run as the owner are refused by the guard, and ten
+    more fail on privileges. They include the review's probes (replacing
     `product_history_append_only` to `RETURN OLD`, `DISABLE TRIGGER` built by
-    concatenation inside `DO`/`EXECUTE`, spacing and case variants), and
-    disabling triggers (`USER`, `ALL`, replica-only), dropping triggers,
-    functions, the table or a column, renaming it, `SECURITY INVOKER`,
-    replacing the recording function, a rule or a new trigger on the
-    history; and, since V4, a new trigger on `product`, dropping or
-    replacing the insert guard and dropping or disabling the delete
-    trigger. Afterwards the five history triggers are enabled with unchanged
-    function bodies (`tgenabled`, `md5(prosrc)`) and
+    concatenation inside `DO`/`EXECUTE`, spacing and case variants),
+    disabling, dropping or replacing any history trigger or function, the
+    TRUNCATE refusal included, turning an ALWAYS trigger back into an
+    origin-only one, dropping or renaming the table or a column, a rule, a
+    new trigger on `product` or the history, and table- or column-level
+    GRANTs or REVOKEs on either table. Afterwards the six history triggers
+    fire ALWAYS (`tgenabled` `A`) with unchanged function bodies, and
     `fbx_history_guard.verify()` returns `armed, intact`. Other owner DDL
     still runs.
-  - The owner cannot disarm the guard, disable its event trigger or edit its
-    state. Disarming is the admin's break-glass; arm and disarm are recorded
-    in `fbx_history_guard.event` and disarming logs a WARNING.
+  - The guard state is append-only: `fbx_history_guard.armed` (one row per
+    arm or disarm) and `fbx_history_guard.event` refuse UPDATE, DELETE and
+    TRUNCATE for the admin too, also in replica mode. Only `arm()`,
+    `disarm()` and `hand_back_history_writer()` may append. The owner cannot
+    disarm the guard or alter its event triggers. `arm()` refuses while
+    armed, and so does the bootstrap. Disarming and hand-back log a WARNING.
+    The round-2 one-row state table is kept as `armed_v1`.
+  - The scheduled `verify()` is a release blocker: any answer other than
+    `armed, intact` pages, blocks promotion to that environment and opens
+    an incident (runbook section 2.3). It is not built yet.
 - Configured but not exercised by a test (plan-only Terraform tests check
   the configuration): pgaudit (`pgaudit.log=ddl,role`) and the
-  `history-tamper` metric filter and alarm on guard messages, pgaudit lines
-  naming the history objects and rejected history changes.
-- Not covered: the admin (rds_superuser) can disarm the guard or drop its
-  event triggers; that is the break-glass path, alarmed but not prevented.
-  The schema owner can still change `product` directly (every change is
-  recorded with its role) and read the history.
-  The owner credential lives only in the `migrate` init container. Creating
-  the event triggers as `rds_superuser` on Aurora is documented AWS
-  behaviour but has not been run here.
+  `history-tamper` alarm. Its filter (a) ORs guard messages, the
+  schema-qualified history name, rejected history changes and inserts,
+  `fbx_history_guard`, `EVENT TRIGGER` and `AUDIT: OBJECT`. Filters (b) and
+  (c) match pgaudit session DDL that names `product_history` or
+  `fbx_history_guard`. Arm, disarm and Flyway releases that touch the
+  history page by design. terraform-modules #11 creates only the
+  `rds_pgaudit` role, so the guard issues the object-audit grants itself:
+  INSERT, UPDATE and DELETE on its state tables, and UPDATE and DELETE on
+  `product_history`. Whether these produce `AUDIT: OBJECT` lines on Aurora
+  16 is *to be verified in the terraform-modules Aurora 16 drill*.
+- Not covered:
+  - The admin (`rds_superuser`) can disarm the guard (break-glass, recorded
+    and alarmed). It can also drop or disable the guard's event triggers.
+    That is logged and alarmed via the `EVENT TRIGGER` term, and `verify()`
+    reports it, but it is not prevented.
+  - The schema owner can still change `product` directly (every change is
+    recorded with its role) and read the history.
+  - Between the first deploy and `arm()`, the schema owner still holds the
+    recording function and INSERT. The runbook keeps that window short.
+  - The owner credential lives only in the `migrate` init container.
+  - Some Aurora behaviour is documented by AWS or platform but has not been
+    run here: creating event triggers as `rds_superuser`, and its
+    `GRANT ... WITH INHERIT TRUE, SET TRUE` on the owner and writer roles.
+    The latter works only for roles it holds ADMIN OPTION on, so the admin
+    creates all of them. Both are *to be verified in the terraform-modules
+    Aurora 16 drill*.
 - Import attribution: `import-products.sh` takes the operator's identity from
   `aws sts get-caller-identity` (the same credentials that fetched the
   `db-import` secret) and the database rejects import-role changes without
