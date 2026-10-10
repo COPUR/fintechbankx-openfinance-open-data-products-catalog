@@ -303,18 +303,42 @@ resource "aws_cloudwatch_metric_alarm" "aurora_connections" {
   alarm_actions       = var.alarm_topic_arn == "" ? [] : [var.alarm_topic_arn]
 }
 
-# Tamper detection for the append-only history. The history guard
-# (db/bootstrap/history-guard.sql) prevents the schema owner's DDL on it; this
-# alarm reports every refusal and a disarmed guard (both log
-# "product_history guard"), any DDL that reaches the history table or its two
-# functions (pgaudit AUDIT lines carry the qualified object name, whatever the
-# statement's spelling and also inside DO/EXECUTE), and rejected UPDATE,
-# DELETE or TRUNCATE of product_history ("append-only"). A reviewed migration
-# that changes the history under break-glass fires it too, as intended.
+# Tamper detection for the append-only history, three filters on one metric.
+# CloudWatch ORs terms only with "?" and ANDs space-separated terms, so:
+#   (a) guard_and_objects ORs: guard refusals, disarm and hand-back warnings
+#       ("product_history guard"), any log line naming the schema-qualified
+#       history (pgaudit prints the object name whatever the spelling, also
+#       inside DO/EXECUTE), rejected UPDATE/DELETE/TRUNCATE ("append-only")
+#       and inserts ("only the history trigger"), the guard's schema, DDL on
+#       the event triggers ("EVENT TRIGGER": the admin can drop or disable
+#       them; this is detection, not prevention) and pgaudit object-audit
+#       lines ("AUDIT: OBJECT": writes to the guard state at arm and disarm,
+#       attempted UPDATE/DELETE of the history);
+#   (b), (c) pgaudit session DDL only when it names product_history or
+#       fbx_history_guard, so ordinary releases (DDL on product) do not page.
+locals {
+  history_tamper_or_terms = [
+    "product_history guard",
+    "${var.database_schema}.product_history",
+    "append-only",
+    "only the history trigger",
+    "fbx_history_guard",
+    "EVENT TRIGGER",
+    "AUDIT: OBJECT",
+  ]
+  history_tamper_patterns = {
+    guard_and_objects   = join(" ", [for term in local.history_tamper_or_terms : "?\"${term}\""])
+    session_ddl_history = "\"AUDIT: SESSION\" \",DDL,\" \"product_history\""
+    session_ddl_guard   = "\"AUDIT: SESSION\" \",DDL,\" \"fbx_history_guard\""
+  }
+}
+
 resource "aws_cloudwatch_log_metric_filter" "history_tamper" {
-  name           = "${local.name}-history-tamper"
+  for_each = local.history_tamper_patterns
+
+  name           = "${local.name}-history-tamper-${replace(each.key, "_", "-")}"
   log_group_name = aws_cloudwatch_log_group.postgresql.name
-  pattern        = "?\"product_history guard\" ?\"sc_of_open_products_catalog.product_history\" ?\"append-only\""
+  pattern        = each.value
 
   metric_transformation {
     name          = "ProductHistoryTamperSignals"
@@ -324,9 +348,15 @@ resource "aws_cloudwatch_log_metric_filter" "history_tamper" {
   }
 }
 
+# The single round-2 filter becomes filter (a).
+moved {
+  from = aws_cloudwatch_log_metric_filter.history_tamper
+  to   = aws_cloudwatch_log_metric_filter.history_tamper["guard_and_objects"]
+}
+
 resource "aws_cloudwatch_metric_alarm" "history_tamper" {
   alarm_name          = "${local.name}-history-tamper"
-  alarm_description   = "The product_history guard refused DDL or was disarmed, DDL reached the history objects (pgaudit), or a history change was rejected. Check the PostgreSQL log, fbx_history_guard.verify() and fbx_history_guard.event; expected only during a reviewed break-glass migration."
+  alarm_description   = "product_history tamper signal: the guard refused DDL, a history change or insert was rejected, DDL or pgaudit reached the history, the guard schema or the event triggers. Also pages, by design: arm and disarm of the guard (and hand-back), and every Flyway release whose migration touches product_history or fbx_history_guard. Check the PostgreSQL log, fbx_history_guard.verify() and fbx_history_guard.event; expected only under a reviewed change ticket."
   namespace           = "FinTechBankX/OpenProductsCatalog"
   metric_name         = "ProductHistoryTamperSignals"
   statistic           = "Sum"

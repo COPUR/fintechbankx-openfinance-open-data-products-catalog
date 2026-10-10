@@ -123,6 +123,17 @@ variable "alarm_topic_arn" {
   default     = ""
 }
 
+variable "database_schema" {
+  type        = string
+  description = "PostgreSQL schema of the service (Flyway schemas / default-schema). The history-tamper filter matches the schema-qualified history name in pgaudit lines."
+  default     = "sc_of_open_products_catalog"
+
+  validation {
+    condition     = can(regex("^[a-z_][a-z0-9_]{0,62}$", var.database_schema))
+    error_message = "database_schema must be a lower-case PostgreSQL identifier (a-z, 0-9, _; not starting with a digit; at most 63 characters)."
+  }
+}
+
 variable "identity_provider_url" {
   type        = string
   description = "OIDC issuer of the platform Keycloak realm."
