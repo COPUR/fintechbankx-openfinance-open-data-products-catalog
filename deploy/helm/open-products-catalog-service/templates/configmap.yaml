@@ -5,17 +5,50 @@
        optional:configtree:/etc/fintechbankx/config/; this chart renders none. */}}
 {{- $denied := "^SPRING_CONFIG_(IMPORT|LOCATION|ADDITIONAL_?LOCATION)(_|$)|^SPRING_APPLICATION_JSON$" }}
 {{- $deniedMsg := "is not allowed: the chart sets no Spring config location (spring.config.import, spring.config.location, spring.config.additional-location or SPRING_APPLICATION_JSON); only a chart-rendered optional:configtree:/etc/fintechbankx/config/ would be, and this chart renders none" }}
-{{- range $key, $_ := .Values.config }}
-{{- if regexMatch $denied (upper (regexReplaceAll "[^A-Za-z0-9]" (toString $key) "_")) }}
-{{- fail (printf "config.%s %s" $key $deniedMsg) }}
+{{- /* No Spring profile from values (round 6, as in the retail and corporate charts): the startup
+       TLS assertion (DatabaseTlsEnvironmentPostProcessor) runs under the aws profile the chart
+       renders on every container. config and extraEnv may not set SPRING_PROFILES_* in any
+       spelling Spring's relaxed binding reads (case and separators ignored), and the JVM option
+       variables JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS and JAVA_OPTS may not mention spring.profiles
+       in any spelling (one from valueFrom cannot be inspected and is refused).
+       SPRING_APPLICATION_JSON is refused above. The assertion has no enforce flag. */}}
+{{- $profileMsg := "the startup TLS assertion (DatabaseTlsEnvironmentPostProcessor) runs under the aws profile the chart renders on every container, which values cannot change" }}
+{{- $jvmOptions := list "JAVATOOLOPTIONS" "JDKJAVAOPTIONS" "JAVAOPTS" }}
+{{- $entries := list }}
+{{- range $key, $value := .Values.config }}
+{{- $entries = append $entries (dict "where" (printf "config.%s" $key) "name" (toString $key) "value" (toString $value) "literal" true) }}
+{{- end }}
+{{- $extraEnv := .Values.extraEnv | default list }}
+{{- if kindIs "map" $extraEnv }}
+{{- range $key, $value := $extraEnv }}
+{{- $entries = append $entries (dict "where" (printf "extraEnv.%s" $key) "name" (toString $key) "value" (toString $value) "literal" true) }}
+{{- end }}
+{{- else }}
+{{- range $entry := $extraEnv }}
+{{- if kindIs "map" $entry }}
+{{- $name := toString (get $entry "name") }}
+{{- $entries = append $entries (dict "where" (printf "extraEnv %s" $name) "name" $name "value" (toString (get $entry "value")) "literal" (hasKey $entry "value")) }}
 {{- end }}
 {{- end }}
-{{- with .Values.extraEnv }}
-{{- range . }}
-{{- if regexMatch $denied (upper (regexReplaceAll "[^A-Za-z0-9]" (toString .name) "_")) }}
-{{- fail (printf "extraEnv %s %s" .name $deniedMsg) }}
+{{- end }}
+{{- range $e := $entries }}
+{{- if regexMatch $denied (upper (regexReplaceAll "[^A-Za-z0-9]" $e.name "_")) }}
+{{- fail (printf "%s %s" $e.where $deniedMsg) }}
+{{- end }}
+{{- $normalized := regexReplaceAll "[^A-Z0-9]" (upper $e.name) "" }}
+{{- if hasPrefix "SPRINGPROFILES" $normalized }}
+{{- fail (printf "%s must not be set: %s" $e.where $profileMsg) }}
+{{- end }}
+{{- if has $normalized $jvmOptions }}
+{{- if not $e.literal }}
+{{- fail (printf "%s must be a literal value (valueFrom cannot be checked for spring.profiles): %s" $e.where $profileMsg) }}
+{{- end }}
+{{- if regexMatch "(?i)spring[^a-z0-9]?profiles" $e.value }}
+{{- fail (printf "%s must not set spring.profiles: %s" $e.where $profileMsg) }}
 {{- end }}
 {{- end }}
+{{- end }}
+{{- if $extraEnv }}
 {{- fail "extraEnv is not supported by this chart: put non-secret settings under config (rendered into the ConfigMap and checked)" }}
 {{- end }}
 {{- $_ := required "config.DB_URL is required (deploy/terraform output jdbc_url)" .Values.config.DB_URL }}

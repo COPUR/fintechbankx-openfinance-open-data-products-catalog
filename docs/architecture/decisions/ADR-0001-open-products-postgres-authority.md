@@ -238,7 +238,10 @@ So there is **no monolith catalogue data to backfill**.
   profile and are not checked. The chart also refuses any Spring config
   location (`spring.config.import`, `.location`, `.additional-location`, in
   any relaxed-binding spelling, or `SPRING_APPLICATION_JSON`) in `config`
-  and any `extraEnv`. It renders no configtree.
+  and any `extraEnv`. It renders no configtree. Values cannot change the
+  `aws` profile either (round 6): `SPRING_PROFILES_*` in any relaxed-binding
+  spelling, and `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS` or `JAVA_OPTS`
+  mentioning `spring.profiles`, are refused in `config` and `extraEnv`.
 - The service's database load is at most one indexed query per pod per
   snapshot interval; Aurora Serverless v2 can run at a low minimum capacity.
 - Request-rate limiting is the API gateway's job (mesh PR #11, `5e756f0`:

@@ -209,7 +209,10 @@ production import window (step 2's `\password`, then `put-secret-value`).
    profile, and under it the service also refuses to start with any other
    URL. The chart refuses Spring config locations (`spring.config.import`,
    `.location`, `.additional-location`, `SPRING_APPLICATION_JSON`) in
-   `config` and any `extraEnv`. The `migrate` init
+   `config` and any `extraEnv`. It also refuses any Spring profile from
+   values (`SPRING_PROFILES_*` in any relaxed-binding spelling, or
+   `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS` or `JAVA_OPTS` mentioning
+   `spring.profiles`), so a `local` profile cannot reach the pods. The `migrate` init
    container runs Flyway as the owner and exits; the service then starts with
    the runtime role and Flyway disabled. The pods are selected by
    `app.kubernetes.io/name`, `instance` and `component=service`. The
