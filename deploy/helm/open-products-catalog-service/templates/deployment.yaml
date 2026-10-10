@@ -5,6 +5,11 @@ metadata:
   namespace: {{ include "products.namespace" . }}
   labels:
     {{- include "products.labels" . | nindent 4 }}
+  {{- with .Values.historyGuardCheck.breakGlassTicket }}
+  annotations:
+    # Break-glass release: the pre-upgrade history guard gate was skipped (runbook section 2.3).
+    fintechbankx.io/history-guard-break-glass: {{ . | quote }}
+  {{- end }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
@@ -75,6 +80,9 @@ spec:
             - secretRef:
                 name: {{ include "products.migrationSecretName" . }}
           env:
+            # Startup refuses a database URL without verified TLS (DatabaseTlsEnvironmentPostProcessor).
+            - name: SPRING_PROFILES_ACTIVE
+              value: aws
             - name: OPEN_PRODUCTS_MIGRATE_ONLY
               value: "true"
             - name: SPRING_MAIN_WEB_APPLICATION_TYPE
@@ -120,13 +128,16 @@ spec:
             - secretRef:
                 name: {{ include "products.dbSecretName" . }}
             {{- end }}
-          {{- if .Values.externalSecret.enabled }}
           env:
+            # Startup refuses a database URL without verified TLS (DatabaseTlsEnvironmentPostProcessor).
+            - name: SPRING_PROFILES_ACTIVE
+              value: aws
+            {{- if .Values.externalSecret.enabled }}
             # The schema was migrated by the init container; the runtime role
             # (SELECT on product only) could not run Flyway anyway.
             - name: SPRING_FLYWAY_ENABLED
               value: "false"
-          {{- end }}
+            {{- end }}
           startupProbe:
             httpGet:
               path: /actuator/health/liveness

@@ -89,6 +89,26 @@ externalSecret:
   migrationRemoteSecretName: ""
   refreshInterval: 1h
 
+# History guard integrity check (runbook section 2.3), a release blocker. The
+# service in check mode runs fbx_history_guard.verify() as the runtime role and
+# exits non-zero unless it answers 'armed, intact':
+# - a CronJob on this schedule; a failed Job raises the platform's job-failure
+#   alert for the namespace;
+# - a pre-upgrade hook Job (the release gate): helm upgrade fails and nothing is
+#   applied. Not pre-install: the guard is armed after the first install.
+historyGuardCheck:
+  schedule: "*/15 * * * *"
+  # Break-glass release only (runbook section 2.3: disarm, deploy, arm): the
+  # change ticket, e.g. CHG-1234. Skips the release gate for this release and
+  # records the ticket on the Deployment; the CronJob keeps checking.
+  breakGlassTicket: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+    limits:
+      memory: 512Mi
+
 networkPolicy:
   # Off by default: the mesh repo owns NetworkPolicy for the namespace
   # (cicd-templates 1dd1138). Turn on only where the mesh policy is absent.

@@ -1,0 +1,47 @@
+{{- if .Values.externalSecret.enabled }}
+{{- with .Values.historyGuardCheck.breakGlassTicket }}
+{{- if not (regexMatch "^[A-Za-z][A-Za-z0-9]*-[0-9]+$" .) }}
+{{- fail (printf "historyGuardCheck.breakGlassTicket %q must be a change ticket id such as CHG-1234" .) }}
+{{- end }}
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "products.name" . }}-history-guard-check
+  namespace: {{ include "products.namespace" . }}
+  labels:
+    {{- include "products.historyGuardCheckLabels" . | nindent 4 }}
+spec:
+  schedule: {{ required "historyGuardCheck.schedule is required" .Values.historyGuardCheck.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      template:
+        {{- include "products.historyGuardCheckPod" . | nindent 8 }}
+{{- if not .Values.historyGuardCheck.breakGlassTicket }}
+---
+# Release gate: runs before any resource of an upgrade is applied; a failed check
+# fails helm upgrade (runbook section 2.3).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "products.name" . }}-history-guard-gate
+  namespace: {{ include "products.namespace" . }}
+  labels:
+    {{- include "products.historyGuardCheckLabels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    {{- include "products.historyGuardCheckPod" . | nindent 4 }}
+{{- end }}
+{{- end }}

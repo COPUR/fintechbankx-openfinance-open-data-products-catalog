@@ -239,11 +239,12 @@ jobs:
             echo "rendered chart sets a Spring config location"
             exit 1
           fi
-      - name: Both containers trust the platform RDS CA bundle
+      - name: Every database client container trusts the platform RDS CA bundle
         run: |
           # ConfigMap rds-ca-bundle (key global-bundle.pem), published by trust-manager (platform contract).
+          # migrate, the service, the history guard CronJob and the release gate Job.
           grep -q "name: rds-ca-bundle$" rendered.yaml
-          test "$(grep -c 'mountPath: /etc/fintechbankx/rds-ca$' rendered.yaml)" -eq 2
+          test "$(grep -c 'mountPath: /etc/fintechbankx/rds-ca$' rendered.yaml)" -eq 4
       - name: App pods and every selector carry app.kubernetes.io/component=service
         run: |
           # cicd-templates 335a345: component=service keeps Service, PDB, NetworkPolicy,
