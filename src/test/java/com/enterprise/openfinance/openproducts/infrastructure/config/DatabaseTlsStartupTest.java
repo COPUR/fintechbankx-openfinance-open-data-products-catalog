@@ -25,6 +25,13 @@ class DatabaseTlsStartupTest {
     }
 
     @Test
+    void withNoProfileTheServiceStillRefusesToStartWithoutVerifiedTls() {
+        // Guardrail 4a single form: on by default, so a pod whose profiles were changed is still checked.
+        assertThatThrownBy(() -> start(new String[0], "jdbc:postgresql://127.0.0.1:1/x?sslmode=require&" + CA))
+            .hasStackTraceContaining("spring.datasource.url must set sslmode=verify-full");
+    }
+
+    @Test
     void awsProfileRefusesARepeatedSslmode() {
         assertThatThrownBy(() -> start("jdbc:postgresql://127.0.0.1:1/x?sslmode=verify-full&" + CA + "&SSLMODE=disable"))
             .hasStackTraceContaining("spring.datasource.url must set sslmode exactly once");
@@ -37,12 +44,17 @@ class DatabaseTlsStartupTest {
     }
 
     private static void start(String url) {
+        start(new String[] {"aws"}, url);
+    }
+
+    private static void start(String[] profiles, String url) {
         new SpringApplicationBuilder(Application.class)
             .web(WebApplicationType.NONE)
-            .profiles("aws")
+            .profiles(profiles)
             .properties("spring.datasource.hikari.connection-timeout=250", "spring.flyway.connect-retries=0")
-            // A command-line argument, as application.yml outranks default properties.
-            .run("--spring.datasource.url=" + url)
+            // Command-line arguments, as application.yml outranks default properties; the test
+            // resources switch the assertion off, so the shipped default is restated here.
+            .run("--spring.datasource.url=" + url, "--fintechbankx.tls.enforce=true")
             .close();
     }
 }
