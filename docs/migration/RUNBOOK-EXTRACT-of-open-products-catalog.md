@@ -277,25 +277,42 @@ Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migratio
   - `OpenProductsHistoryGuardCheckFailed`: a check Job failed, from the
     CronJob or the pre-upgrade gate. Either `verify()` did not answer
     `armed, intact`, or the check could not get an answer (no connection,
-    TLS refused, credential, image). Response: read the failed Job's log
-    (`kubectl -n open-finance logs job/<job>`; the gate's Job stays for
-    inspection). If it names an answer, treat it as the integrity incident
-    above: open an incident, block releases to the environment, compare
+    TLS refused, credential, image). It fires for as long as a failed check
+    Job object exists, not until the next successful run: the CronJob keeps
+    its last 3 failed Jobs (`failedJobsHistoryLimit: 3`) and the gate's
+    failed Job stays until the next upgrade attempt, so a later successful
+    check does not clear it (observability 6e66584
+    `prometheus/rules/open-data-products.rules.yml:24-28`). Response: read
+    the failed Job's log (`kubectl -n open-finance logs job/<job>`; list them
+    with `kubectl -n open-finance get jobs` and look for `Failed`). If it
+    names an answer, treat it as the integrity incident above: open an
+    incident, block releases to the environment, compare
     `fbx_history_guard.event` and `fbx_history_guard.armed` with the change
     tickets, and re-arm only under a ticket (break-glass, below). If it
     names a connection, TLS or credential failure, fix that and re-run the
-    check by hand (`kubectl -n open-finance create job --from=cronjob/open-products-catalog-service-history-guard-check <name>`);
-    the alert clears on the next successful run. During a break-glass
-    release it keeps firing until step 4 (`arm`), by design.
-  - `OpenProductsHistoryGuardCheckNotRunning`: no check has run when it
-    should have, so the history is unwatched. Causes: the CronJob was
-    deleted or suspended, its schedule changed, its pods cannot start
-    (scheduling, image pull, egress) or `externalSecret.enabled=false`
-    removed it. Response: restore the CronJob from the chart
-    (`helm upgrade` of the current release), check
+    check by hand (`kubectl -n open-finance create job --from=cronjob/open-products-catalog-service-history-guard-check <name>`)
+    until it completes. Then, with the cause recorded in the incident or
+    ticket, delete every failed check Job
+    (`kubectl -n open-finance delete job <job>`); the alert clears once none
+    is left. Do not delete a failed Job before triage: its log is the
+    evidence. During a break-glass release it keeps firing until step 4
+    (`arm`), a successful check after it, and the deletion of the failed
+    Jobs, by design.
+  - `OpenProductsHistoryGuardCheckNotRunning`: the CronJob exists but no
+    check has succeeded when it should have, so the history is unwatched.
+    Causes: the CronJob is suspended, its schedule changed, or its pods
+    cannot start or finish (scheduling, image pull, egress). Response:
+    `helm upgrade` of the current release restores the chart's CronJob,
+    then check
     `kubectl -n open-finance get cronjob open-products-catalog-service-history-guard-check`
-    shows `SUSPEND False` and a recent `LAST SCHEDULE`, then run one check
+    shows `SUSPEND False` and a recent `LAST SCHEDULE`, and run one check
     by hand as above.
+    **Known gap:** the rule raises nothing when the CronJob is absent
+    (deleted by hand, never deployed, or not rendered because
+    `externalSecret.enabled=false`): an absent CronJob has no series
+    (observability 6e66584 `prometheus/rules/open-data-products.rules.yml:70-71`).
+    Neither alert covers that case; after any change to the release, check
+    that the CronJob exists (`kubectl -n open-finance get cronjob open-products-catalog-service-history-guard-check`).
   - The CronJob is never suspended in normal operation: the chart renders
     no `spec.suspend` and has no value for it (the deploy/helm job asserts
     this). Suspending it by hand (`kubectl patch ... suspend: true`) stops
@@ -341,8 +358,9 @@ Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migratio
   3. Deploy with `--set historyGuardCheck.breakGlassTicket=<ticket>`. This
      skips the pre-upgrade gate for this release only, which would otherwise
      refuse because the guard is disarmed, and records the ticket on the
-     Deployment. The CronJob keeps paging until step 4. Then check the
-     history objects.
+     Deployment. The CronJob's failed Jobs keep paging until step 4, a
+     successful check and their deletion (section 2.3, alerts). Then check
+     the history objects.
   4. `SELECT fbx_history_guard.arm('<ticket>');` moves the writer back,
      clears the owner's INSERT (column grants included) and records the new
      state.

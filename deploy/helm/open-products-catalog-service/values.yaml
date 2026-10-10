@@ -92,8 +92,10 @@ externalSecret:
 # History guard integrity check (runbook section 2.3), a release blocker. The
 # service in check mode runs fbx_history_guard.verify() as the runtime role and
 # exits non-zero unless it answers 'armed, intact':
-# - a CronJob on this schedule; a failed Job raises the platform's job-failure
-#   alert for the namespace;
+# - a CronJob on this schedule; a failed Job raises OpenProductsHistoryGuardCheckFailed
+#   (platform observability, Open Data squad), which stays until the failed Job is
+#   deleted after triage (runbook section 2.3). The default KubeJobFailed is
+#   inhibited for these Jobs;
 # - a pre-upgrade hook Job (the release gate): helm upgrade fails and nothing is
 #   applied. Not pre-install: the guard is armed after the first install.
 historyGuardCheck:

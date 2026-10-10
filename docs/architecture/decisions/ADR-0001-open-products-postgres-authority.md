@@ -187,8 +187,10 @@ So there is **no monolith catalogue data to backfill**.
     (`historyGuardCheck.breakGlassTicket`), which skips only that gate. The
     integration test proves the check fails against the real guard when it
     is disarmed or changed. It has not run in a cluster yet, because nothing
-    is deployed. Paging on a failed CronJob relies on the platform's
-    job-failure alert for the namespace.
+    is deployed. A failed check Job pages through the platform's
+    `OpenProductsHistoryGuardCheckFailed` (observability 6e66584; the
+    default `KubeJobFailed` is inhibited for these Jobs), which stays until
+    the failed Job is deleted after triage.
 - Configured but not exercised by a test (plan-only Terraform tests check
   the configuration): pgaudit (`pgaudit.log=ddl,role`) and the
   `history-tamper` alarm. Its filter (a) ORs guard messages, the
