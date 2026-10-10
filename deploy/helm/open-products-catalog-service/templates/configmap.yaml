@@ -1,3 +1,23 @@
+{{- /* No Spring config location from values (round 5): an import or location would load
+       configuration the chart does not render or check, past every guard here. Keys are
+       normalised the way Spring's relaxed binding reads environment variables. A configtree
+       is allowed only as a value the chart itself renders on
+       optional:configtree:/etc/fintechbankx/config/; this chart renders none. */}}
+{{- $denied := "^SPRING_CONFIG_(IMPORT|LOCATION|ADDITIONAL_?LOCATION)(_|$)|^SPRING_APPLICATION_JSON$" }}
+{{- $deniedMsg := "is not allowed: the chart sets no Spring config location (spring.config.import, spring.config.location, spring.config.additional-location or SPRING_APPLICATION_JSON); only a chart-rendered optional:configtree:/etc/fintechbankx/config/ would be, and this chart renders none" }}
+{{- range $key, $_ := .Values.config }}
+{{- if regexMatch $denied (upper (regexReplaceAll "[^A-Za-z0-9]" (toString $key) "_")) }}
+{{- fail (printf "config.%s %s" $key $deniedMsg) }}
+{{- end }}
+{{- end }}
+{{- with .Values.extraEnv }}
+{{- range . }}
+{{- if regexMatch $denied (upper (regexReplaceAll "[^A-Za-z0-9]" (toString .name) "_")) }}
+{{- fail (printf "extraEnv %s %s" .name $deniedMsg) }}
+{{- end }}
+{{- end }}
+{{- fail "extraEnv is not supported by this chart: put non-secret settings under config (rendered into the ConfigMap and checked)" }}
+{{- end }}
 {{- $_ := required "config.DB_URL is required (deploy/terraform output jdbc_url)" .Values.config.DB_URL }}
 {{- /* Aurora's certificate is verified against the platform RDS CA bundle (platform contract, Database CA bundle). */}}
 {{- $ca := printf "sslrootcert=%s/%s" .Values.databaseCaBundle.mountPath .Values.databaseCaBundle.key }}
