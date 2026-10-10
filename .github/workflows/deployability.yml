@@ -239,6 +239,48 @@ jobs:
             echo "rendered chart sets a Spring config location"
             exit 1
           fi
+      - name: Rendering fails for a Spring profile set through values (startup TLS assertion)
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          url='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
+          # Round 6 (as in retail and corporate): DatabaseTlsEnvironmentPostProcessor runs under the aws
+          # profile the chart renders on every container. Nothing in values may change the profiles:
+          # SPRING_PROFILES_* in config or extraEnv in any spelling Spring's relaxed binding reads
+          # (case, ".", "_" and "-" ignored), SPRING_APPLICATION_JSON, and JVM option variables that
+          # set spring.profiles.* (for example a local profile). There is no enforce flag.
+          work="$(mktemp -d)"
+          values() { f="$(mktemp -p "$work")"; printf '%s\n' 'config:' "  DB_URL: \"$url\"" "$@" > "$f"; echo "$f"; }
+          must_refuse() {
+            desc="$1"; expected="$2"; shift 2
+            if out="$(helm template ci "$chart" $common "$@" 2>&1)"; then echo "$desc must be refused"; exit 1; fi
+            echo "$out" | grep -q "$expected" || { echo "$desc failed for another reason: $out"; exit 1; }
+          }
+          for name in SPRING_PROFILES_ACTIVE spring.profiles.active Spring-Profiles-Include SPRING_PROFILES_DEFAULT \
+                      spring_profiles_group_aws SPRING_PROFILESACTIVE; do
+            must_refuse "config.$name" 'startup TLS assertion' -f "$(values "  $name: local")"
+            must_refuse "extraEnv $name" 'startup TLS assertion' -f "$(values 'extraEnv:' "  - name: $name" '    value: local')"
+          done
+          must_refuse "extraEnv map SPRING_PROFILES_ACTIVE" 'startup TLS assertion' -f "$(values 'extraEnv:' '  SPRING_PROFILES_ACTIVE: local')"
+          for name in SPRING_APPLICATION_JSON spring.application.json; do
+            must_refuse "config.$name" 'SPRING_APPLICATION_JSON' -f "$(values "  $name: '{\"spring\":{\"profiles\":{\"active\":\"local\"}}}'")"
+          done
+          for name in JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS JAVA_OPTS java.tool.options; do
+            must_refuse "config.$name with spring.profiles" 'startup TLS assertion' -f "$(values "  $name: -Dspring.profiles.active=local")"
+            must_refuse "config.$name with SPRING_PROFILES" 'startup TLS assertion' -f "$(values "  $name: -DSPRING_PROFILES_INCLUDE=local")"
+            must_refuse "extraEnv $name with spring.profiles" 'startup TLS assertion' -f "$(values 'extraEnv:' "  - name: $name" '    value: -Dspring-profiles-active=local')"
+          done
+          # JVM options that do not touch profiles still render.
+          helm template ci "$chart" $common -f "$(values '  JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70')" > /dev/null
+          rm -rf "$work"
+          # The only profile setting in the rendered manifests is the chart's own SPRING_PROFILES_ACTIVE=aws.
+          got="$(grep -iE -A1 'SPRING[._-]?PROFILES' rendered.yaml | grep -v '^--$' || true)"
+          names="$(echo "$got" | grep -ciE 'SPRING[._-]?PROFILES' || true)"
+          wanted="$(echo "$got" | grep -cE '^[[:space:]]*- name: SPRING_PROFILES_ACTIVE$' || true)"
+          aws="$(echo "$got" | grep -cE '^[[:space:]]*value: "?aws"?$' || true)"
+          if [ "$names" -eq 0 ] || [ "$names" -ne "$wanted" ] || [ "$names" -ne "$aws" ]; then
+            echo "rendered profile settings must be the chart's own SPRING_PROFILES_ACTIVE=aws: $got"; exit 1
+          fi
       - name: Every database client container trusts the platform RDS CA bundle
         run: |
           # ConfigMap rds-ca-bundle (key global-bundle.pem), published by trust-manager (platform contract).
