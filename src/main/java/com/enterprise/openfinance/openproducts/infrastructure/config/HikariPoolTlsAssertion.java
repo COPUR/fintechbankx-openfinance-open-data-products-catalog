@@ -3,7 +3,6 @@ package com.enterprise.openfinance.openproducts.infrastructure.config;
 import com.zaxxer.hikari.HikariDataSource;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Function;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.core.env.Environment;
 
@@ -13,23 +12,21 @@ import org.springframework.core.env.Environment;
  * (it opens on the first getConnection), its jdbcUrl must pass the same verify-full rule as
  * {@link DatabaseTlsEnvironmentPostProcessor}, no data-source property may touch TLS (ssl*,
  * service), and no dataSourceClassName or DataSource may replace the URL (Hikari would ignore
- * jdbcUrl, sslmode included). Active under the same condition: the deployment marker or the
- * aws profile.
+ * jdbcUrl, sslmode included). On under the same switch: always, unless fintechbankx.tls.enforce
+ * is false (local profile and tests only).
  */
 final class HikariPoolTlsAssertion implements BeanPostProcessor {
 
     private final Environment environment;
-    private final Function<String, String> processEnvironment;
 
-    HikariPoolTlsAssertion(Environment environment, Function<String, String> processEnvironment) {
+    HikariPoolTlsAssertion(Environment environment) {
         this.environment = environment;
-        this.processEnvironment = processEnvironment;
     }
 
     @Override
     public Object postProcessAfterInitialization(Object bean, String beanName) {
         if (bean instanceof HikariDataSource pool
-            && DatabaseTlsEnvironmentPostProcessor.enforced(environment, processEnvironment)) {
+            && DatabaseTlsEnvironmentPostProcessor.enforced(environment)) {
             String where = "DataSource " + beanName;
             if (pool.getDataSourceClassName() != null || pool.getDataSource() != null) {
                 throw new IllegalStateException(where + " must connect through its verified jdbcUrl, not a"

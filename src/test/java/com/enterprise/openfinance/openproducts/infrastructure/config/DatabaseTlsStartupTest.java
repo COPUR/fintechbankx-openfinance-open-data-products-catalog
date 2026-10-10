@@ -8,7 +8,7 @@ import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 
 /**
- * Under the aws profile (set by the Helm chart on every container), the
+ * Whatever the profiles (on by default, fintechbankx.tls.enforce), the
  * service refuses to start unless its JDBC URLs verify Aurora's certificate:
  * exactly one sslmode=verify-full and the platform RDS CA bundle as
  * sslrootcert. The check runs before any bean, so no connection is tried.

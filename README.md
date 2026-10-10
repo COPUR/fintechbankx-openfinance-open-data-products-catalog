@@ -71,7 +71,7 @@ product catalogue from its own PostgreSQL database
 |---|---|
 | Unit and web tests (no database; PostgreSQL tests are skipped locally, but fail when `CI=true` or `JENKINS_URL` is set) | `./gradlew test` |
 | Full gate incl. PostgreSQL tests and coverage (the login must be a superuser: the tests create roles and the history guard's event triggers) | `TEST_DB_URL=jdbc:postgresql://localhost:5432/<db> TEST_DB_USERNAME=... TEST_DB_PASSWORD=... ./gradlew check` |
-| Run locally with sample data | `DB_URL=jdbc:postgresql://localhost:5432/<db> DB_USERNAME=... SPRING_DATASOURCE_PASSWORD=... OPEN_PRODUCTS_SEED_ENABLED=true ./gradlew bootRun` |
+| Run locally with sample data | `SPRING_PROFILES_ACTIVE=local DB_URL=jdbc:postgresql://localhost:5432/<db> DB_USERNAME=... SPRING_DATASOURCE_PASSWORD=... OPEN_PRODUCTS_SEED_ENABLED=true ./gradlew bootRun`. The startup TLS check is on by default (`fintechbankx.tls.enforce`: every JDBC URL `sslmode=verify-full` with the RDS CA bundle); only the `local` profile and the test resources switch it off, and the chart refuses both |
 | Load or update the catalogue | `IMPORT_OPERATOR=<id> db/import/import-products.sh [--full\|--delta] "<conninfo as open_products_catalog_import>" products.csv` (format: `db/import/products.example.csv`; `--full`, the default, withdraws products missing from the file) |
 | Rehearse migration, seed and import | `PGHOST=... PGUSER=... PGPASSWORD=... scripts/migration/verify-migration.sh` |
 | Container image | `docker build -t open-products-catalog-service:dev .` |

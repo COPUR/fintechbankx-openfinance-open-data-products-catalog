@@ -39,6 +39,15 @@ spring:
     user: ${FLYWAY_USER:${spring.datasource.username}}
     password: ${FLYWAY_PASSWORD:${spring.datasource.password:}}
 
+fintechbankx:
+  tls:
+    # Startup TLS check (guardrail 4a): on. DatabaseTlsEnvironmentPostProcessor and
+    # HikariPoolTlsAssertion refuse to start unless every JDBC URL and the effective pool
+    # verify Aurora's certificate against the mounted RDS CA bundle. Only the local profile
+    # (application-local.yml) and the test resources set it false; the chart never does and
+    # refuses FINTECHBANKX_TLS_ENFORCE and every profile name.
+    enforce: true
+
 openproducts:
   # true: migrate the schema and exit (Helm init container); see MigrateOnlyConfiguration.
   migrate-only: ${OPEN_PRODUCTS_MIGRATE_ONLY:false}

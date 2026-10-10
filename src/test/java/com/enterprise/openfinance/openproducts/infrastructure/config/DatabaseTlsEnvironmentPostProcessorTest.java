@@ -24,8 +24,11 @@ class DatabaseTlsEnvironmentPostProcessorTest {
     }
 
     @Test
-    void withoutTheAwsProfileNothingIsChecked() {
+    void onlyEnforceFalseSkipsTheCheck() {
         MockEnvironment local = new MockEnvironment().withProperty("spring.datasource.url", "jdbc:postgresql://localhost:5432/x");
+        assertThatThrownBy(() -> processor.postProcessEnvironment(local, new SpringApplication()))
+            .hasMessageStartingWith("spring.datasource.url must set sslmode=verify-full");
+        local.setProperty("fintechbankx.tls.enforce", "false");
         assertThatCode(() -> processor.postProcessEnvironment(local, new SpringApplication())).doesNotThrowAnyException();
     }
 
@@ -52,7 +55,7 @@ class DatabaseTlsEnvironmentPostProcessorTest {
         assertThatThrownBy(() -> processor.postProcessEnvironment(aws(url), new SpringApplication()))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageStartingWith("spring.datasource.url ")
-            .hasMessageContaining("under the aws profile");
+            .hasMessageContaining("only with a verified certificate (fintechbankx.tls.enforce is true");
     }
 
     @Test

@@ -231,11 +231,14 @@ So there is **no monolith catalogue data to backfill**.
   migrate init container), the runtime role can only `SELECT` from `product`,
   and the import role can `SELECT`, `INSERT` and `UPDATE` it.
 - Database TLS: the chart refuses a JDBC URL that does not verify Aurora's
-  certificate. Every container it renders runs under the `aws` profile, and
-  under that profile the service refuses to start unless the URL has exactly
-  one `sslmode=verify-full` and the platform RDS CA bundle as `sslrootcert`
-  (no other `ssl*` parameter, no `service`). Tests and local runs have no
-  profile and are not checked. The chart also refuses any Spring config
+  certificate. Whatever the profiles, the service refuses to start unless
+  the URL has exactly one `sslmode=verify-full` and the platform RDS CA
+  bundle as `sslrootcert` (no other `ssl*` parameter, no `service`); the
+  effective Hikari pool is checked too. Guardrail 4a, single form (round 7,
+  as loan-lifecycle-core `TlsEnforcement`): `fintechbankx.tls.enforce` is
+  true in `application.yml`, and only the `local` profile
+  (`application-local.yml`) and the test resources set it false; the chart
+  refuses the key. No profile or deployment marker is involved. The chart also refuses any Spring config
   location (`spring.config.import`, `.location`, `.additional-location`, in
   any relaxed-binding spelling, or `SPRING_APPLICATION_JSON`) in `config`
   and any `extraEnv`. It renders no configtree. Values cannot change the

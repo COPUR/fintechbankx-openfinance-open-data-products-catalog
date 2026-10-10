@@ -5,14 +5,16 @@
        optional:configtree:/etc/fintechbankx/config/; this chart renders none. */}}
 {{- $denied := "^SPRING_CONFIG_(IMPORT|LOCATION|ADDITIONAL_?LOCATION)(_|$)|^SPRING_APPLICATION_JSON$" }}
 {{- $deniedMsg := "is not allowed: the chart sets no Spring config location (spring.config.import, spring.config.location, spring.config.additional-location or SPRING_APPLICATION_JSON); only a chart-rendered optional:configtree:/etc/fintechbankx/config/ would be, and this chart renders none" }}
-{{- /* No Spring profile from values (round 6, as in the retail and corporate charts): the startup
-       TLS assertion (DatabaseTlsEnvironmentPostProcessor) runs under the aws profile the chart
-       renders on every container. config and extraEnv may not set SPRING_PROFILES_* in any
+{{- /* No Spring profile from values (round 6, as in the retail and corporate charts): a profile
+       can activate an application-<profile> config in the image, and the local profile switches
+       the startup TLS assertion (DatabaseTlsEnvironmentPostProcessor, on by default) off; the
+       chart renders the only profile, aws, on every container. config and extraEnv may not set SPRING_PROFILES_* in any
        spelling Spring's relaxed binding reads (case and separators ignored), and the JVM option
        variables JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS and JAVA_OPTS may not mention spring.profiles
        in any spelling (one from valueFrom cannot be inspected and is refused).
-       SPRING_APPLICATION_JSON is refused above. The assertion has no enforce flag. */}}
-{{- $profileMsg := "the startup TLS assertion (DatabaseTlsEnvironmentPostProcessor) runs under the aws profile the chart renders on every container, which values cannot change" }}
+       SPRING_APPLICATION_JSON is refused above. The assertion's only switch,
+       fintechbankx.tls.enforce, is refused by the vendored guard in every spelling. */}}
+{{- $profileMsg := "the chart renders the only profile (aws) on every container, which values cannot change: a profile can activate the local profile's application-local.yml, which switches the startup TLS assertion (DatabaseTlsEnvironmentPostProcessor) off" }}
 {{- /* Nothing in values reaches the datasource around config.DB_URL (round 7, as in the consent,
        payee and atm charts; cicd-templates 13ca2c6 charts/fintechbankx-service/templates/
        _helpers.tpl:105-121): no spring.datasource.*, spring.flyway.*, spring.liquibase.* or
@@ -55,10 +57,6 @@
        chart had). */}}
 {{- if regexMatch "(?i)^spring[._-]?kafka[._-]" $e.name }}
 {{- fail (printf "%s is not allowed: spring.kafka.* is not set through values (this service has no Kafka client)" $e.where) }}
-{{- end }}
-{{- /* FBX_DEPLOYED is the chart-owned marker that enforces the startup TLS assertion. */}}
-{{- if eq (regexReplaceAll "[^A-Z0-9]" (upper $e.name) "") "FBXDEPLOYED" }}
-{{- fail (printf "%s is not allowed: FBX_DEPLOYED is the chart-owned deployment marker that enforces the startup TLS assertion; values never set it" $e.where) }}
 {{- end }}
 {{- $normalized := regexReplaceAll "[^A-Z0-9]" (upper $e.name) "" }}
 {{- if hasPrefix "SPRINGPROFILES" $normalized }}

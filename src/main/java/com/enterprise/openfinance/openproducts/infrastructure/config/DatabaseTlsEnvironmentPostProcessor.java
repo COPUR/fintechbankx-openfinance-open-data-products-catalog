@@ -1,12 +1,9 @@
 package com.enterprise.openfinance.openproducts.infrastructure.config;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
-import java.util.function.Function;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
@@ -14,55 +11,37 @@ import org.springframework.boot.env.EnvironmentPostProcessor;
 import org.springframework.core.Ordered;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.Environment;
-import org.springframework.core.env.Profiles;
 
 /**
- * Fails startup under the aws profile, and whenever the chart-owned deployment marker
- * FBX_DEPLOYED is in the process environment (the chart renders it directly on every
- * container, never from values, and refuses config.FBX_DEPLOYED), unless every JDBC URL
- * the service uses (spring.datasource.url, and spring.datasource.hikari.jdbc-url and
- * spring.flyway.url when set) verifies Aurora's
- * certificate: exactly one sslmode, set to verify-full, and exactly one
- * sslrootcert, set to the platform RDS CA bundle the Helm chart mounts. Any
- * other ssl* parameter, or service, is refused too, because it can switch the
- * verification off or redirect the connection. The Helm chart checks the same
- * rule at render time and sets SPRING_PROFILES_ACTIVE=aws on every container;
- * this is the runtime half, so a URL that reaches the pod another way still
- * cannot connect without verification. No Hikari data-source property may touch TLS
- * (ssl*, service). With the marker, startup also fails unless the aws profile is active
- * and no local, test or in-memory profile is, so a profile set or baked in some other
- * way cannot switch the check off; {@link HikariPoolTlsAssertion} then checks the
- * effective pool after binding.
+ * Startup TLS check (guardrail 4a, single form: on by default). It runs in every context
+ * that is not explicitly local or test, on every container the chart renders (migrate init
+ * container, service container, history guard check): fintechbankx.tls.enforce is true in
+ * application.yml (and when unset), and only the local profile (application-local.yml) and
+ * the test resources (application.properties) set it false. The chart never sets it and
+ * refuses the key, every spring.profiles.* name and the JVM options that could carry them.
+ * No profile or deployment marker is needed. It fails startup unless every JDBC URL the
+ * service uses (spring.datasource.url, and spring.datasource.hikari.jdbc-url and
+ * spring.flyway.url when set) verifies Aurora's certificate: exactly one sslmode, set to
+ * verify-full, and exactly one sslrootcert, set to the platform RDS CA bundle the Helm
+ * chart mounts. Any other ssl* parameter, or service, is refused too, because it can
+ * switch the verification off or redirect the connection. No Hikari data-source property
+ * may touch TLS (ssl*, service). The Helm chart checks the same rule at render time; this
+ * is the runtime half, so a URL that reaches the pod another way still cannot connect
+ * without verification. {@link HikariPoolTlsAssertion} then checks the effective pool
+ * after binding, under the same switch.
  *
  * Runs after the config data is loaded and before any bean is created, so no
- * connection is tried. Without the marker and the aws profile (tests, local
- * runs) it does nothing.
+ * connection is tried.
  */
 public class DatabaseTlsEnvironmentPostProcessor implements EnvironmentPostProcessor, Ordered {
 
-    static final String PROFILE = "aws";
+    /** The only switch; true unless local or test configuration says otherwise. */
+    public static final String ENFORCE_PROPERTY = "fintechbankx.tls.enforce";
     static final String ROOT_CERT = "/etc/fintechbankx/rds-ca/global-bundle.pem";
-    /** Rendered by the chart on every container; read from the process environment only. */
-    static final String DEPLOYED_MARKER = "FBX_DEPLOYED";
-    /** Profiles for local runs and tests (in-memory catalogue); never active in a deployment. */
-    static final Set<String> LOCAL_PROFILES = Set.of("local", "test", "in-memory");
-
-    private final Function<String, String> processEnvironment;
-
-    public DatabaseTlsEnvironmentPostProcessor() {
-        this(System::getenv);
-    }
-
-    DatabaseTlsEnvironmentPostProcessor(Function<String, String> processEnvironment) {
-        this.processEnvironment = processEnvironment;
-    }
 
     @Override
     public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {
-        if (isDeployed(processEnvironment)) {
-            requireDeployedProfiles(environment);
-        }
-        if (!enforced(environment, processEnvironment)) {
+        if (!enforced(environment)) {
             return;
         }
         requireVerifiedTls("spring.datasource.url", environment.getProperty("spring.datasource.url"));
@@ -79,26 +58,9 @@ public class DatabaseTlsEnvironmentPostProcessor implements EnvironmentPostProce
                 .orElse(Map.of()).keySet());
     }
 
-    /** Any value counts: the chart renders "true", and values can neither set nor clear it. */
-    static boolean isDeployed(Function<String, String> processEnvironment) {
-        return processEnvironment.apply(DEPLOYED_MARKER) != null;
-    }
-
-    static boolean enforced(Environment environment, Function<String, String> processEnvironment) {
-        return isDeployed(processEnvironment) || environment.acceptsProfiles(Profiles.of(PROFILE));
-    }
-
-    static void requireDeployedProfiles(Environment environment) {
-        List<String> active = Arrays.asList(environment.getActiveProfiles());
-        String hint = DEPLOYED_MARKER + " is set (chart-rendered deployment), so the active profiles must include "
-            + PROFILE + " and no local profile " + LOCAL_PROFILES + "; active: " + active;
-        if (!active.contains(PROFILE)) {
-            throw new IllegalStateException(hint + " (the " + PROFILE + " profile is missing)");
-        }
-        active.stream().filter(profile -> LOCAL_PROFILES.contains(profile.toLowerCase(Locale.ROOT))).findFirst()
-            .ifPresent(profile -> {
-                throw new IllegalStateException(hint + " (local profile " + profile + " is active)");
-            });
+    /** True unless the property says false; an unreadable value fails the start. */
+    static boolean enforced(Environment environment) {
+        return environment.getProperty(ENFORCE_PROPERTY, Boolean.class, true);
     }
 
     /** Driver properties set outside the URL (Hikari data-source-properties) must not touch TLS. */
@@ -159,7 +121,8 @@ public class DatabaseTlsEnvironmentPostProcessor implements EnvironmentPostProce
     }
 
     private static IllegalStateException refused(String property, String reason) {
-        return new IllegalStateException(property + " " + reason + " under the " + PROFILE
-            + " profile: the service connects to Aurora only with a verified certificate");
+        return new IllegalStateException(property + " " + reason + ": the service connects to Aurora only with a"
+            + " verified certificate (" + ENFORCE_PROPERTY + " is true; only the local profile and the test resources"
+            + " set it false, the chart never does)");
     }
 }

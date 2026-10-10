@@ -54,6 +54,10 @@ ingress gateway. Everything here is **Proposed** until the owning squad deploys 
   JDBC verifies the server certificate and host name (`sslmode=verify-full`)
   against the platform's RDS CA bundle (ConfigMap `rds-ca-bundle`, mounted
   read-only at `/etc/fintechbankx/rds-ca`); the chart refuses any other `DB_URL`.
+  A startup TLS check that is on by default (`fintechbankx.tls.enforce`; only
+  the `local` profile and the test resources set it false, and the chart
+  refuses the key and every profile name) refuses any other URL and checks
+  the effective Hikari pool on every container, before anything connects.
 
 ## Performance efficiency
 

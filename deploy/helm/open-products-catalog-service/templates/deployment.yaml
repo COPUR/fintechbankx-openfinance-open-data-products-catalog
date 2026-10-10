@@ -7,8 +7,10 @@ value of this chart that feeds one of the guard's routes; a key left out is neve
 - extraEnv: .Values.extraEnv as a list ({name, value} entries; the map form is converted),
   refused whole by configmap.yaml since the chart renders none. No env value of the
   templates is interpolated from values (all literals or secretKeyRefs), so there is nothing
-  else to pass. SPRING_PROFILES_ACTIVE (aws) and FBX_DEPLOYED are chart-rendered literals
-  and are not passed: the guard refuses every spring.profiles.* name it is given.
+  else to pass. SPRING_PROFILES_ACTIVE (aws) is a chart-rendered literal and is not
+  passed: the guard refuses every spring.profiles.* name it is given. The startup TLS
+  assertion needs no chart-rendered switch: it is on by default (fintechbankx.tls.enforce,
+  which the guard refuses).
 - envFrom, extraEnvFrom: no such values; mapped so that a value set there (which no template
   renders) is refused rather than ignored.
 - javaToolOptions: the chart has no such value and renders none; a value set there is refused
@@ -135,11 +137,6 @@ spec:
             # Startup refuses a database URL without verified TLS (DatabaseTlsEnvironmentPostProcessor).
             - name: SPRING_PROFILES_ACTIVE
               value: aws
-            # Chart-owned deployment marker (never from values; config.FBX_DEPLOYED is refused):
-            # with it DatabaseTlsEnvironmentPostProcessor is enforced whatever the profiles, and
-            # refuses to start without the aws profile or with a local profile.
-            - name: FBX_DEPLOYED
-              value: "true"
             - name: OPEN_PRODUCTS_MIGRATE_ONLY
               value: "true"
             - name: SPRING_MAIN_WEB_APPLICATION_TYPE
@@ -189,11 +186,6 @@ spec:
             # Startup refuses a database URL without verified TLS (DatabaseTlsEnvironmentPostProcessor).
             - name: SPRING_PROFILES_ACTIVE
               value: aws
-            # Chart-owned deployment marker (never from values; config.FBX_DEPLOYED is refused):
-            # with it DatabaseTlsEnvironmentPostProcessor is enforced whatever the profiles, and
-            # refuses to start without the aws profile or with a local profile.
-            - name: FBX_DEPLOYED
-              value: "true"
             {{- if .Values.externalSecret.enabled }}
             # The schema was migrated by the init container; the runtime role
             # (SELECT on product only) could not run Flyway anyway.
