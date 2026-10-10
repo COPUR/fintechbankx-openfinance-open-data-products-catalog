@@ -21,7 +21,14 @@
 #      (review probes), and that the triggers and function bodies are intact,
 #  11. checks the history cannot be forged or bypassed by the owner: direct
 #      inserts into product_history are refused, deleting a product is
-#      recorded, and no new trigger on product may write the history.
+#      recorded, and no new trigger on product may write the history,
+#  12. checks TRUNCATE of product is refused for every role, the admin
+#      included, also in replica mode (V5), and that only the NOLOGIN history
+#      writer may insert history rows (V5's insert guard, a superuser's
+#      trigger included),
+#  13. checks the guard covers table and column privileges, its own state is
+#      append-only, and arm/disarm/hand-back/re-arm keep the owner without
+#      INSERT on the history, column grants included (has_any_column_privilege).
 # There is no monolith data to backfill (ADR-0001), so there is no source DB.
 #
 # Needs psql and a superuser (it creates roles and a database), via the usual
@@ -116,6 +123,8 @@ GRANT CONNECT, CREATE ON DATABASE $db TO $owner;
 GRANT CONNECT ON DATABASE $db TO $app;
 GRANT CONNECT, TEMPORARY ON DATABASE $db TO $importer;
 SQL
+# Stand-in for the Aurora pgaudit object-audit role (pgaudit.role = rds_pgaudit).
+psql_q -d postgres -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_pgaudit') THEN CREATE ROLE rds_pgaudit NOLOGIN; END IF; END \$\$"
 # The admin installs the history guard (event triggers), disarmed until the
 # first deploy has created the history.
 psql_q -d "$db" -v schema="$schema" -f "$root/db/bootstrap/history-guard.sql"
@@ -130,6 +139,9 @@ done
 echo "--- admin arms the history guard after the first deploy"
 psql_q -d "$db" -c "SELECT fbx_history_guard.arm('rehearsal: first deploy')" > /dev/null
 check "history guard is armed and intact" "SELECT fbx_history_guard.verify()" "armed, intact"
+check "object audit: rds_pgaudit holds UPDATE, DELETE on the history and INSERT, UPDATE, DELETE on the guard state" \
+  "SELECT string_agg(table_schema || '.' || table_name || ':' || privilege_type, ',' ORDER BY 1) FROM (SELECT table_schema, table_name, privilege_type FROM information_schema.role_table_grants WHERE grantee = 'rds_pgaudit' ORDER BY 1, 2, 3) g" \
+  "fbx_history_guard.armed:DELETE,fbx_history_guard.armed:INSERT,fbx_history_guard.armed:UPDATE,fbx_history_guard.event:DELETE,fbx_history_guard.event:INSERT,fbx_history_guard.event:UPDATE,$schema.product_history:DELETE,$schema.product_history:UPDATE"
 
 for run in 1 2; do
   echo "--- seed run $run"
@@ -138,7 +150,24 @@ done
 check "seed loads four SAMPLE- products at version 0" \
   "SELECT count(*) || ' ' || max(version) FROM $schema.product WHERE product_id LIKE 'SAMPLE-%'" "4 0"
 
-psql_q -d "$db" -c "TRUNCATE $schema.product"
+# V5: TRUNCATE product is refused for every role, the admin included, also
+# under session_replication_role = replica; clear the seed rows with DELETE
+# (each removal is recorded).
+if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "TRUNCATE $schema.product" 2> "$work/truncate.err"; then
+  echo "FAIL the admin truncated product without history" >&2
+  exit 1
+fi
+grep -q "TRUNCATE is refused" "$work/truncate.err" || { cat "$work/truncate.err" >&2; exit 1; }
+echo "ok   TRUNCATE product is refused, also for the admin"
+if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET session_replication_role = replica" -c "TRUNCATE $schema.product" 2> "$work/truncate.err"; then
+  echo "FAIL the admin truncated product in replica mode" >&2
+  exit 1
+fi
+grep -q "TRUNCATE is refused" "$work/truncate.err" || { cat "$work/truncate.err" >&2; exit 1; }
+echo "ok   TRUNCATE product is refused in replica mode (trigger fires ALWAYS)"
+psql_q -d "$db" -c "DELETE FROM $schema.product"
+check "clearing the seed rows is recorded" \
+  "SELECT count(*) FROM $schema.product_history WHERE operation = 'DELETE' AND product_id LIKE 'SAMPLE-%'" "4"
 
 for run in 1 2; do
   echo "--- import run $run"
@@ -333,7 +362,7 @@ grep -q "permission denied for function product_history_record" "$work/forge_src
 echo "ok   the history function cannot be attached to another table"
 check "no forged row reached the history" "SELECT count(*) FROM $schema.product_history WHERE product_id LIKE 'FORGED%'" "0"
 check "the schema owner holds no INSERT on the history" \
-  "SELECT has_table_privilege('$owner', '$schema.product_history', 'INSERT')::text" "false"
+  "SELECT has_any_column_privilege('$owner', '$schema.product_history', 'INSERT')::text" "false"
 check "the history writer (NOLOGIN) owns the recording function and alone may insert" \
   "SELECT pg_get_userbyid(p.proowner) || ':' || p.prosecdef || ':' || r.rolcanlogin || ':' || has_table_privilege(r.rolname, '$schema.product_history', 'INSERT') FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.oid = '$schema.product_history_record()'::regprocedure" \
   "open_products_catalog_history_writer:true:false:true"
@@ -350,7 +379,7 @@ integrity_sql="SELECT string_agg(t.tgname || ':' || t.tgenabled::text || ':' || 
  WHERE t.tgrelid IN ('$schema.product'::regclass, '$schema.product_history'::regclass) AND NOT t.tgisinternal"
 intact="$(psql -X -At -d "$db" -c "$integrity_sql")"
 case "$intact" in
-  trg_product_history:O:*,trg_product_history_delete:O:*,trg_product_history_insert_guard:O:*,trg_product_history_no_change:O:*,trg_product_history_no_truncate:O:*) ;;
+  trg_product_history:A:*,trg_product_history_delete:A:*,trg_product_history_insert_guard:A:*,trg_product_history_no_change:A:*,trg_product_history_no_truncate:A:*,trg_product_no_truncate:A:*) ;;
   *) echo "FAIL history triggers before the probes: $intact" >&2; exit 1 ;;
 esac
 refused "probe 1: replace the append-only function to return OLD" \
@@ -367,9 +396,13 @@ refused "turn a history trigger into a replica-only trigger" \
 refused "drop the history-recording trigger" "DROP TRIGGER trg_product_history ON product"
 refused "drop an append-only trigger" "DROP TRIGGER trg_product_history_no_truncate ON product_history"
 refused "drop the append-only function with its triggers" "DROP FUNCTION product_history_append_only() CASCADE"
-refused "make the recording function SECURITY INVOKER" "ALTER FUNCTION product_history_record() SECURITY INVOKER"
-refused "replace the recording function" \
+denied "make the recording function SECURITY INVOKER (owned by the history writer)" as_owner \
+  "ALTER FUNCTION product_history_record() SECURITY INVOKER"
+denied "replace the recording function (owned by the history writer)" as_owner \
   'CREATE OR REPLACE FUNCTION product_history_record() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $f$ BEGIN RETURN NULL; END $f$'
+denied "the owner cannot grant itself EXECUTE on the recording function" as_owner \
+  "GRANT EXECUTE ON FUNCTION product_history_record() TO $owner"
+denied "the owner cannot become the history writer" as_owner "SET ROLE open_products_catalog_history_writer"
 refused "drop the history table" "DROP TABLE product_history"
 refused "rename the history table" "ALTER TABLE product_history RENAME TO product_history_old"
 refused "drop a history column" "ALTER TABLE product_history DROP COLUMN operator_arn"
@@ -385,6 +418,63 @@ refused "grant the runtime role SELECT on the history" "GRANT SELECT ON product_
 refused "grant the runtime role UPDATE on product" "GRANT UPDATE ON product TO $app"
 denied "the owner cannot take back or replace the recording function" as_owner \
   "ALTER FUNCTION product_history_record() OWNER TO $owner"
+refused "review probe: column-level INSERT on the history to the owner" \
+  "GRANT INSERT (product_id, operation, new_row, changed_by, login_role, application_name, transaction_id, changed_at) ON product_history TO $owner"
+refused "column-level UPDATE on product to the runtime role" "GRANT UPDATE (name) ON product TO $app"
+refused "column-level INSERT on product to the runtime role" "GRANT INSERT (product_id) ON product TO $app"
+refused "the owner revokes the history writer's INSERT" "REVOKE INSERT ON product_history FROM open_products_catalog_history_writer"
+refused "the owner revokes the runtime role's SELECT on product" "REVOKE SELECT ON product FROM $app"
+denied "the owner cannot truncate product" as_owner "TRUNCATE product"
+refused "drop the TRUNCATE refusal on product" "DROP TRIGGER trg_product_no_truncate ON product"
+refused "turn the TRUNCATE refusal into an origin-only trigger" "ALTER TABLE product ENABLE TRIGGER trg_product_no_truncate"
+refused "replace the TRUNCATE refusal function" \
+  'CREATE OR REPLACE FUNCTION product_truncate_refused() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NULL; END $f$'
+if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET search_path = $schema" -c "SET session_replication_role = replica" \
+     -c "CREATE TABLE forge_su (id int); CREATE FUNCTION forge_su_fn() RETURNS trigger LANGUAGE plpgsql AS \$f\$ BEGIN INSERT INTO product_history (product_id, operation, new_row, changed_by, login_role, application_name, transaction_id, changed_at) VALUES ('FORGED-SU', 'INSERT', '{}', 'x', 'x', 'x', 0, now()); RETURN NULL; END \$f\$; CREATE TRIGGER trg_forge_su AFTER INSERT ON forge_su FOR EACH ROW EXECUTE FUNCTION forge_su_fn(); ALTER TABLE forge_su ENABLE ALWAYS TRIGGER trg_forge_su; INSERT INTO forge_su VALUES (1)" 2> "$work/forge_su.err"; then
+  echo "FAIL a superuser forged history through a trigger in replica mode" >&2
+  exit 1
+fi
+grep -q "only the history trigger" "$work/forge_su.err" || { cat "$work/forge_su.err" >&2; exit 1; }
+echo "ok   the insert guard refuses any inserter but the history writer, also a superuser in replica mode"
+for stmt in "DELETE FROM fbx_history_guard.event" "UPDATE fbx_history_guard.armed SET by_role = 'x'" \
+            "TRUNCATE fbx_history_guard.event" "TRUNCATE fbx_history_guard.armed"; do
+  if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET session_replication_role = replica" -c "$stmt" 2> "$work/state.err"; then
+    echo "FAIL the admin rewrote the guard state: $stmt" >&2
+    exit 1
+  fi
+  grep -qE "fbx_history_guard\.(event|armed) is append-only" "$work/state.err" || { cat "$work/state.err" >&2; exit 1; }
+done
+echo "ok   the guard state (armed, event) is append-only, also for the admin in replica mode"
+if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE fbx_history_guard.armed SET is_armed = false" 2> "$work/state.err"; then
+  echo "FAIL the admin updated the arming log" >&2; exit 1
+fi
+grep -q "fbx_history_guard.armed is append-only" "$work/state.err" || { cat "$work/state.err" >&2; exit 1; }
+echo "ok   the arming log refuses updates"
+if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "ALTER TABLE fbx_history_guard.event DISABLE TRIGGER trg_event_append_only" 2> "$work/state.err"; then
+  echo "FAIL the admin disabled the event log's append-only trigger while armed" >&2; exit 1
+fi
+grep -q "product_history guard" "$work/state.err" || { cat "$work/state.err" >&2; exit 1; }
+echo "ok   DDL on the guard's own schema is refused while armed, also for the admin"
+if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -v schema="$schema" -f "$root/db/bootstrap/history-guard.sql" > /dev/null 2> "$work/rerun.err"; then
+  echo "FAIL the bootstrap re-ran while armed" >&2; exit 1
+fi
+grep -q "disarm(<ticket>) before re-running the bootstrap" "$work/rerun.err" || { cat "$work/rerun.err" >&2; exit 1; }
+echo "ok   the bootstrap refuses to re-run while armed"
+if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SELECT fbx_history_guard.arm('re-arm while armed')" 2> "$work/rearm.err"; then
+  echo "FAIL arm() ran while armed" >&2; exit 1
+fi
+grep -q "already armed" "$work/rearm.err" || { cat "$work/rearm.err" >&2; exit 1; }
+echo "ok   arm() refuses while armed (disarm first)"
+# GRANT ROLE fires no event trigger: verify() must see it, and the guard state stays closed to the member.
+psql_q -d "$db" -c "GRANT rds_pgaudit TO $owner"
+check "a new member of the audit role is reported" "SELECT fbx_history_guard.verify()" "CHANGED SINCE ARMED"
+if as_owner psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO fbx_history_guard.armed (is_armed) VALUES (false)" 2> "$work/state.err"; then
+  echo "FAIL a member of rds_pgaudit disarmed the guard by inserting a state row" >&2; exit 1
+fi
+grep -q "fbx_history_guard.armed is written only by arm()" "$work/state.err" || { cat "$work/state.err" >&2; exit 1; }
+echo "ok   a member of rds_pgaudit cannot append to the guard state"
+psql_q -d "$db" -c "REVOKE rds_pgaudit FROM $owner"
+check "guard intact again once the membership is gone" "SELECT fbx_history_guard.verify()" "armed, intact"
 refused "drop the insert guard on the history" "DROP TRIGGER trg_product_history_insert_guard ON product_history"
 refused "replace the insert-guard function" \
   'CREATE OR REPLACE FUNCTION product_history_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NEW; END $f$'
@@ -404,11 +494,32 @@ psql_q -d "$db" -c "SELECT fbx_history_guard.disarm('rehearsal: break-glass')" >
 grep -q "WARNING:  product_history guard: DISARMED" "$work/disarm.err" || { echo "FAIL disarming logged no warning" >&2; cat "$work/disarm.err" >&2; exit 1; }
 echo "ok   disarming the guard logs a warning for the alarm"
 check "disarmed guard reports it" "SELECT fbx_history_guard.verify()" "DISARMED"
+check "disarming keeps the history writer" \
+  "SELECT pg_get_userbyid(proowner) || ':' || has_any_column_privilege('$owner', '$schema.product_history', 'INSERT') FROM pg_proc WHERE oid = '$schema.product_history_record()'::regprocedure" \
+  "open_products_catalog_history_writer:false"
+# Disarmed: a column grant to the owner goes through, but the V5 insert guard still refuses its inserts.
+as_owner psql_q -d "$db" -c "SET search_path = $schema" \
+  -c "GRANT INSERT (product_id, operation, new_row, changed_by, login_role, application_name, transaction_id, changed_at) ON product_history TO $owner"
+if as_owner psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET search_path = $schema" -c "${forge_src_sql//forge_src/forge_col}" 2> "$work/forge_col.err"; then
+  echo "FAIL the owner forged history with a column grant" >&2; exit 1
+fi
+grep -q "only the history trigger" "$work/forge_col.err" || { cat "$work/forge_col.err" >&2; exit 1; }
+echo "ok   with a column grant the owner's trigger is still refused by the insert guard"
+psql_q -d "$db" -c "SELECT fbx_history_guard.hand_back_history_writer('rehearsal: migration replaces the recording function')" > /dev/null 2> "$work/handback.err"
+grep -q "WARNING:  product_history guard: history writer HANDED BACK" "$work/handback.err" || { cat "$work/handback.err" >&2; exit 1; }
+check "hand-back returns the function and INSERT to the owner" \
+  "SELECT pg_get_userbyid(proowner) || ':' || has_any_column_privilege('$owner', '$schema.product_history', 'INSERT') FROM pg_proc WHERE oid = '$schema.product_history_record()'::regprocedure" \
+  "$owner:true"
 as_owner psql_q -d "$db" -c "SET search_path = $schema" -c "COMMENT ON TABLE product_history IS 'Append-only change history of product (break-glass rehearsal)'"
 psql_q -d "$db" -c "SELECT fbx_history_guard.arm('rehearsal: re-arm after break-glass')" > /dev/null
 check "re-armed guard is intact" "SELECT fbx_history_guard.verify()" "armed, intact"
-check "both break-glass steps are recorded" \
-  "SELECT string_agg(action, ',' ORDER BY event_id) FROM fbx_history_guard.event" "arm,disarm,arm"
+check "re-arming takes the writer back and clears the owner's column grants" \
+  "SELECT pg_get_userbyid(proowner) || ':' || has_any_column_privilege('$owner', '$schema.product_history', 'INSERT') FROM pg_proc WHERE oid = '$schema.product_history_record()'::regprocedure" \
+  "open_products_catalog_history_writer:false"
+check "every break-glass step is recorded" \
+  "SELECT string_agg(action, ',' ORDER BY event_id) FROM fbx_history_guard.event" "arm,disarm,hand_back,arm"
+check "the arming log keeps every state" \
+  "SELECT string_agg(is_armed::text, ',' ORDER BY armed_id) FROM fbx_history_guard.armed" "true,false,true"
 refused "re-armed guard refuses history DDL again" "COMMENT ON TABLE product_history IS 'x'"
 
 psql_q -d postgres -c "DROP DATABASE $db"
