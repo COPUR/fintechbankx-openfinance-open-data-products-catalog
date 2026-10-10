@@ -233,16 +233,16 @@ class OpenProductsPostgresIT {
         String product = SCHEMA + ".product";
         withArmedGuard(() -> {
             assertThat(guardRefuses("CREATE TABLE " + SCHEMA + ".it_forge_child () INHERITS (" + history + ")"))
-                .contains("product_history guard");
+                .contains("product_history guard", "inherits from");
             assertThat(guardRefuses("CREATE TABLE " + SCHEMA + ".it_shadow_child () INHERITS (" + product + ")"))
-                .contains("product_history guard");
+                .contains("product_history guard", "inherits from");
             assertThat(guardRefuses("CREATE TABLE " + SCHEMA + ".it_forge_like (LIKE " + history + " INCLUDING CONSTRAINTS);"
-                + " ALTER TABLE " + SCHEMA + ".it_forge_like INHERIT " + history)).contains("product_history guard");
+                + " ALTER TABLE " + SCHEMA + ".it_forge_like INHERIT " + history)).contains("product_history guard", "inherits from");
             assertThat(guardRefuses("CREATE TABLE " + SCHEMA + ".it_shadow_like (LIKE " + product + " INCLUDING CONSTRAINTS);"
-                + " ALTER TABLE " + SCHEMA + ".it_shadow_like INHERIT " + product)).contains("product_history guard");
+                + " ALTER TABLE " + SCHEMA + ".it_shadow_like INHERIT " + product)).contains("product_history guard", "inherits from");
             assertThat(guardRefuses("CREATE TABLE " + SCHEMA + ".it_forge_parent (LIKE " + history + ") PARTITION BY LIST (operation);"
                 + " ALTER TABLE " + SCHEMA + ".it_forge_parent ATTACH PARTITION " + history + " DEFAULT"))
-                .contains("product_history guard");
+                .contains("product_history guard", "inherits from");
 
             assertThat(jdbc.queryForObject("SELECT count(*) FROM pg_inherits WHERE inhparent IN (?::regclass, ?::regclass)"
                 + " OR inhrelid IN (?::regclass, ?::regclass)", Integer.class, history, product, history, product)).isZero();

@@ -21,8 +21,13 @@
 --    table and column privileges of product and product_history (so GRANTs
 --    to the runtime, import or owner role are refused), function owners,
 --    privileges, SECURITY DEFINER, search_path and bodies, triggers and
---    their enabled state, history columns and rules, and the history
---    writer's login flag and members.
+--    their enabled state, history columns and rules, the history
+--    writer's login flag and members, and inheritance: neither table may
+--    have a child (CREATE TABLE ... INHERITS, ALTER TABLE ... INHERIT) or
+--    be a partition or child of another table (ATTACH PARTITION). A child's
+--    rows are read through its parent, but the parent's row triggers do not
+--    fire for them, so a child of product_history would carry forged
+--    history and a child of product would add products without history.
 -- 3. The guard's own state (armed, event) is append-only, also for the admin.
 --
 -- Break-glass (runbook section 2.3), admin only, recorded in
@@ -184,6 +189,29 @@ AS $$
     SELECT a FROM fbx_history_guard.armed a ORDER BY a.armed_id DESC LIMIT 1
 $$;
 
+-- product_history and product, in that order (NULL entries until deployed).
+CREATE OR REPLACE FUNCTION fbx_history_guard.protected_tables() RETURNS oid[]
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT ARRAY[to_regclass(format('%I.product_history', s.schema_name))::oid,
+                 to_regclass(format('%I.product', s.schema_name))::oid]
+      FROM fbx_history_guard.settings s
+$$;
+
+-- pg_inherits rows that make product or product_history a parent or a
+-- child (inheritance or partitioning), as text for messages.
+CREATE OR REPLACE FUNCTION fbx_history_guard.inheritance_links() RETURNS SETOF text
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT format('%s inherits from %s', i.inhrelid::regclass, i.inhparent::regclass)
+      FROM pg_inherits i
+     WHERE i.inhparent = ANY (fbx_history_guard.protected_tables())
+        OR i.inhrelid = ANY (fbx_history_guard.protected_tables())
+     ORDER BY 1
+$$;
+
 -- The protected objects and a digest of everything that keeps the history
 -- append-only. NULLs when any of them is missing or a history trigger is off.
 CREATE OR REPLACE FUNCTION fbx_history_guard.current_state(OUT protected_oids oid[], OUT fingerprint text)
@@ -251,7 +279,14 @@ BEGIN
            FROM pg_auth_members m WHERE m.roleid = writer),
         -- Members of the pgaudit object-audit role hold its UPDATE/DELETE on the history.
         (SELECT string_agg(m.member::regrole::text, ',' ORDER BY m.member::regrole::text)
-           FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE r.rolname = 'rds_pgaudit')));
+           FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE r.rolname = 'rds_pgaudit'),
+        -- Inheritance and partitioning, for both tables: children, parents,
+        -- relhassubclass and relispartition (round 5 review).
+        (SELECT string_agg(concat_ws(':', c.relname,
+                                     (SELECT count(*) FROM pg_inherits i WHERE i.inhparent = c.oid),
+                                     (SELECT count(*) FROM pg_inherits i WHERE i.inhrelid = c.oid),
+                                     c.relhassubclass, c.relispartition), ',' ORDER BY c.relname)
+           FROM pg_class c WHERE c.oid IN (hist, prod))));
 END
 $$;
 
@@ -271,6 +306,12 @@ BEGIN
                 WHERE objid = ANY (a.protected_oids) OR schema_name = 'fbx_history_guard' LOOP
         RAISE EXCEPTION 'product_history guard: % on % is refused while the guard is armed', hit.command_tag, hit.object_identity
             USING HINT = 'Break-glass: the admin runs fbx_history_guard.disarm(<ticket>), see the runbook.';
+    END LOOP;
+    -- Inheritance and partitioning: CREATE TABLE ... INHERITS, ALTER TABLE
+    -- ... INHERIT and ATTACH PARTITION report only the other table.
+    FOR hit IN SELECT link FROM fbx_history_guard.inheritance_links() AS link LOOP
+        RAISE EXCEPTION 'product_history guard: % is refused while the guard is armed (%: a child''s rows are read through its parent without its triggers)', tg_tag, hit.link
+            USING HINT = 'product and product_history take no child and no parent. Break-glass: the admin runs fbx_history_guard.disarm(<ticket>), see the runbook.';
     END LOOP;
     SELECT * INTO cur FROM fbx_history_guard.current_state();
     IF cur.fingerprint IS DISTINCT FROM a.fingerprint THEN
@@ -360,6 +401,14 @@ BEGIN
     END IF;
     IF (SELECT fingerprint FROM fbx_history_guard.current_state()) IS NULL THEN
         RAISE EXCEPTION 'product_history guard: cannot arm, the history table, its functions or triggers (V2-V5) are missing or disabled (deploy first)';
+    END IF;
+    IF EXISTS (SELECT 1 FROM fbx_history_guard.inheritance_links()) THEN
+        RAISE EXCEPTION 'product_history guard: cannot arm, %', (SELECT string_agg(l, '; ') FROM fbx_history_guard.inheritance_links() l)
+            USING HINT = 'Detach or drop the other table first; product and product_history take no child and no parent.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = ANY (fbx_history_guard.protected_tables()) AND c.relhassubclass) THEN
+        RAISE EXCEPTION 'product_history guard: cannot arm, product or product_history still has relhassubclass set from a dropped child'
+            USING HINT = 'Run ANALYZE on the table to clear it, then arm.';
     END IF;
     -- Still disarmed here, so the guard does not refuse the transfer's DDL.
     PERFORM fbx_history_guard.set_history_writer(true);

@@ -86,13 +86,14 @@ check() {
 }
 
 # Runs SQL as the schema owner and expects the history guard to refuse it.
+# An optional third argument is a pattern the refusal must also match.
 refused() {
-  local label="$1" sql="$2"
+  local label="$1" sql="$2" reason="${3:-product_history guard}"
   if as_owner psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET search_path = $schema" -c "$sql" 2> "$work/refused.err"; then
     echo "FAIL $label: the schema owner was allowed to run it" >&2
     exit 1
   fi
-  grep -q "product_history guard" "$work/refused.err" || { cat "$work/refused.err" >&2; exit 1; }
+  grep -q "product_history guard" "$work/refused.err" && grep -q "$reason" "$work/refused.err" || { cat "$work/refused.err" >&2; exit 1; }
   echo "ok   $label"
 }
 
@@ -379,17 +380,17 @@ check "deleting a product is recorded with its last values" \
 # parent's row triggers do not fire for rows inserted into the child.
 history_cols="product_id, operation, new_row, changed_by, login_role, application_name, transaction_id, changed_at"
 refused "review probe: a child of product_history carries forged rows visible through the history" \
-  "CREATE TABLE forge_hist_child () INHERITS (product_history); INSERT INTO forge_hist_child (history_id, $history_cols) VALUES (900000001, 'FORGED-CHILD', 'INSERT', '{}', 'x', 'x', 'x', 0, now())"
+  "CREATE TABLE forge_hist_child () INHERITS (product_history); INSERT INTO forge_hist_child (history_id, $history_cols) VALUES (900000001, 'FORGED-CHILD', 'INSERT', '{}', 'x', 'x', 'x', 0, now())" "inherits from"
 refused "review probe: a child of product adds rows the runtime role sees without history" \
-  "CREATE TABLE product_shadow () INHERITS (product); GRANT SELECT ON product_shadow TO $app; INSERT INTO product_shadow (product_id, product_type, segment, name, currency, monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from) VALUES ('SHADOW-001', 'PCA', 'RETAIL', 'Shadow', 'AED', 0.00, 'AED', 0.00, 'ACTIVE', '2026-05-01T00:00:00Z')"
+  "CREATE TABLE product_shadow () INHERITS (product); GRANT SELECT ON product_shadow TO $app; INSERT INTO product_shadow (product_id, product_type, segment, name, currency, monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from) VALUES ('SHADOW-001', 'PCA', 'RETAIL', 'Shadow', 'AED', 0.00, 'AED', 0.00, 'ACTIVE', '2026-05-01T00:00:00Z')" "inherits from"
 refused "ALTER TABLE ... INHERIT product_history on an existing table" \
-  "CREATE TABLE forge_inherit (LIKE product_history INCLUDING CONSTRAINTS); ALTER TABLE forge_inherit INHERIT product_history"
+  "CREATE TABLE forge_inherit (LIKE product_history INCLUDING CONSTRAINTS); ALTER TABLE forge_inherit INHERIT product_history" "inherits from"
 refused "ALTER TABLE ... INHERIT product on an existing table" \
-  "CREATE TABLE shadow_inherit (LIKE product INCLUDING CONSTRAINTS); ALTER TABLE shadow_inherit INHERIT product"
+  "CREATE TABLE shadow_inherit (LIKE product INCLUDING CONSTRAINTS); ALTER TABLE shadow_inherit INHERIT product" "inherits from"
 refused "attach product_history as a partition of another table" \
-  "CREATE TABLE forge_parent (LIKE product_history) PARTITION BY LIST (operation); ALTER TABLE forge_parent ATTACH PARTITION product_history DEFAULT"
+  "CREATE TABLE forge_parent (LIKE product_history) PARTITION BY LIST (operation); ALTER TABLE forge_parent ATTACH PARTITION product_history DEFAULT" "inherits from"
 refused "attach product as a partition of another table" \
-  "CREATE TABLE shadow_parent (LIKE product) PARTITION BY LIST (status); ALTER TABLE shadow_parent ATTACH PARTITION product DEFAULT"
+  "CREATE TABLE shadow_parent (LIKE product) PARTITION BY LIST (status); ALTER TABLE shadow_parent ATTACH PARTITION product DEFAULT" "inherits from"
 check "no table inherits from or contains product or product_history" \
   "SELECT count(*) FROM pg_inherits WHERE inhparent IN ('$schema.product'::regclass, '$schema.product_history'::regclass) OR inhrelid IN ('$schema.product'::regclass, '$schema.product_history'::regclass)" "0"
 check "every row read through product has a history row (none came through a child)" \
@@ -529,6 +530,24 @@ if as_owner psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SET search_path = $schema
 fi
 grep -q "only the history trigger" "$work/forge_col.err" || { cat "$work/forge_col.err" >&2; exit 1; }
 echo "ok   with a column grant the owner's trigger is still refused by the insert guard"
+# Disarmed, the owner can add a child; arm() then refuses until it is gone and relhassubclass is cleared.
+as_owner psql_q -d "$db" -c "SET search_path = $schema" -c "CREATE TABLE forge_disarmed () INHERITS (product_history)"
+if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SELECT fbx_history_guard.arm('rehearsal: child present')" 2> "$work/arm.err"; then
+  echo "FAIL arm() armed with a child of product_history" >&2; exit 1
+fi
+grep -q "cannot arm, $schema.forge_disarmed inherits from $schema.product_history" "$work/arm.err" || { cat "$work/arm.err" >&2; exit 1; }
+echo "ok   arm() refuses while a table inherits from product_history"
+as_owner psql_q -d "$db" -c "SET search_path = $schema" -c "DROP TABLE forge_disarmed"
+if psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "SELECT fbx_history_guard.arm('rehearsal: stale relhassubclass')" 2> "$work/arm.err"; then
+  echo "FAIL arm() armed with relhassubclass still set" >&2; exit 1
+fi
+grep -q "relhassubclass" "$work/arm.err" || { cat "$work/arm.err" >&2; exit 1; }
+echo "ok   arm() refuses until relhassubclass is cleared (ANALYZE)"
+psql_q -d "$db" -c "ANALYZE $schema.product_history"
+# Upgrade path of an armed environment (runbook section 2.3): disarm, re-run the bootstrap, arm.
+psql_q -d "$db" -v schema="$schema" -f "$root/db/bootstrap/history-guard.sql" > /dev/null
+check "the bootstrap re-runs while disarmed and keeps the guard state" \
+  "SELECT fbx_history_guard.verify() || ':' || (SELECT string_agg(action, ',' ORDER BY event_id) FROM fbx_history_guard.event)" "DISARMED:arm,disarm"
 psql_q -d "$db" -c "SELECT fbx_history_guard.hand_back_history_writer('rehearsal: migration replaces the recording function')" > /dev/null 2> "$work/handback.err"
 grep -q "WARNING:  product_history guard: history writer HANDED BACK" "$work/handback.err" || { cat "$work/handback.err" >&2; exit 1; }
 check "hand-back returns the function and INSERT to the owner" \
