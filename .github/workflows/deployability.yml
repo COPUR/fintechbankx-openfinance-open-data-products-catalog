@@ -191,6 +191,36 @@ jobs:
           # ConfigMap rds-ca-bundle (key global-bundle.pem), published by trust-manager (platform contract).
           grep -q "name: rds-ca-bundle$" rendered.yaml
           test "$(grep -c 'mountPath: /etc/fintechbankx/rds-ca$' rendered.yaml)" -eq 2
+      - name: App pods and every selector carry app.kubernetes.io/component=service
+        run: |
+          # cicd-templates 335a345: component=service keeps Service, PDB, NetworkPolicy,
+          # topology spread and the Deployment selector on the serving pods only.
+          python3 - rendered.yaml <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+          def need(labels, where):
+              if (labels or {}).get("app.kubernetes.io/component") != "service":
+                  sys.exit(f"{where} lacks app.kubernetes.io/component=service: {labels}")
+          seen = set()
+          for d in docs:
+              kind, spec = d["kind"], d.get("spec", {})
+              seen.add(kind)
+              if kind == "Deployment":
+                  need(spec["selector"]["matchLabels"], "Deployment selector")
+                  need(spec["template"]["metadata"]["labels"], "app pod labels")
+                  for c in spec["template"]["spec"].get("topologySpreadConstraints", []):
+                      need(c["labelSelector"]["matchLabels"], "topology spread selector")
+              elif kind == "Service":
+                  need(spec["selector"], "Service selector")
+              elif kind == "PodDisruptionBudget":
+                  need(spec["selector"]["matchLabels"], "PodDisruptionBudget selector")
+              elif kind == "NetworkPolicy":
+                  need(spec["podSelector"]["matchLabels"], "NetworkPolicy podSelector")
+          missing = {"Deployment", "Service", "PodDisruptionBudget", "NetworkPolicy"} - seen
+          if missing:
+              sys.exit(f"rendered.yaml has no {sorted(missing)}")
+          print("component=service on the app pods and every selector")
+          PY
       - name: Rendered ConfigMap has no empty or identity-provider keys
         run: |
           if grep -nE '^  OIDC_|: ""$' rendered.yaml; then
