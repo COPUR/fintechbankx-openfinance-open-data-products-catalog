@@ -1,0 +1,3 @@
+# Startup check of the database TLS settings under the aws profile (round 5).
+org.springframework.boot.env.EnvironmentPostProcessor=\
+com.enterprise.openfinance.openproducts.infrastructure.config.DatabaseTlsEnvironmentPostProcessor

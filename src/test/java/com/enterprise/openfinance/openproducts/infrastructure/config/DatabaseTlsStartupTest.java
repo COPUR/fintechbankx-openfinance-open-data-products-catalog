@@ -40,9 +40,9 @@ class DatabaseTlsStartupTest {
         new SpringApplicationBuilder(Application.class)
             .web(WebApplicationType.NONE)
             .profiles("aws")
-            .properties("spring.datasource.url=" + url, "spring.datasource.hikari.connection-timeout=250",
-                "spring.flyway.connect-retries=0")
-            .run()
+            .properties("spring.datasource.hikari.connection-timeout=250", "spring.flyway.connect-retries=0")
+            // A command-line argument, as application.yml outranks default properties.
+            .run("--spring.datasource.url=" + url)
             .close();
     }
 }
