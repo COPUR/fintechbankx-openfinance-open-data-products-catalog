@@ -117,14 +117,73 @@ run "owner_ddl_is_logged_and_alarmed" {
 
   assert {
     condition = alltrue([
-      for term in ["product_history guard", "sc_of_open_products_catalog.product_history", "append-only"] :
-      strcontains(aws_cloudwatch_log_metric_filter.history_tamper.pattern, term)
+      for term in [
+        "?\"product_history guard\"", "?\"sc_of_open_products_catalog.product_history\"", "?\"append-only\"",
+        "?\"only the history trigger\"", "?\"fbx_history_guard\"", "?\"EVENT TRIGGER\"", "?\"AUDIT: OBJECT\"",
+      ] :
+      strcontains(aws_cloudwatch_log_metric_filter.history_tamper["guard_and_objects"].pattern, term)
     ])
-    error_message = "The metric filter must catch guard refusals and disarming, pgaudit DDL lines on the history objects and rejected history changes."
+    error_message = "Filter (a) must OR guard refusals and disarming, the qualified history name, rejected history changes and inserts, the guard schema, event trigger DDL and pgaudit object-audit lines."
+  }
+
+  # CloudWatch ANDs space-separated terms: session DDL pages only when it names a protected object.
+  assert {
+    condition     = aws_cloudwatch_log_metric_filter.history_tamper["session_ddl_history"].pattern == "\"AUDIT: SESSION\" \",DDL,\" \"product_history\""
+    error_message = "Filter (b) must match pgaudit session DDL lines that name product_history, and nothing else."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_log_metric_filter.history_tamper["session_ddl_guard"].pattern == "\"AUDIT: SESSION\" \",DDL,\" \"fbx_history_guard\""
+    error_message = "Filter (c) must match pgaudit session DDL lines that name fbx_history_guard, and nothing else."
+  }
+
+  assert {
+    condition = alltrue([
+      for f in aws_cloudwatch_log_metric_filter.history_tamper :
+      f.log_group_name == aws_cloudwatch_log_group.postgresql.name
+      && one(f.metric_transformation).name == aws_cloudwatch_metric_alarm.history_tamper.metric_name
+      && one(f.metric_transformation).namespace == aws_cloudwatch_metric_alarm.history_tamper.namespace
+    ]) && length(aws_cloudwatch_log_metric_filter.history_tamper) == 3
+    error_message = "The three history-tamper filters must read the PostgreSQL log and feed the alarm's metric."
+  }
+
+  assert {
+    condition = alltrue([
+      for phrase in ["arm", "disarm", "Flyway release"] :
+      strcontains(aws_cloudwatch_metric_alarm.history_tamper.alarm_description, phrase)
+    ])
+    error_message = "The alarm description must say that arming, disarming and Flyway releases touching the history page too."
   }
 
   assert {
     condition     = aws_cloudwatch_metric_alarm.history_tamper.threshold == 1 && aws_cloudwatch_metric_alarm.history_tamper.alarm_actions == toset(["arn:aws:sns:me-central-1:111122223333:open-finance-oncall"])
     error_message = "One matching log line must page the on-call topic."
   }
+}
+
+# The qualified history name in filter (a) follows the service schema.
+run "history_filter_follows_the_schema" {
+  command = plan
+
+  variables {
+    database_schema = "sc_x"
+  }
+
+  assert {
+    condition = (
+      strcontains(aws_cloudwatch_log_metric_filter.history_tamper["guard_and_objects"].pattern, "?\"sc_x.product_history\"")
+      && !strcontains(aws_cloudwatch_log_metric_filter.history_tamper["guard_and_objects"].pattern, "sc_of_open_products_catalog")
+    )
+    error_message = "Filter (a) must use database_schema for the qualified history name."
+  }
+}
+
+run "refuses_a_schema_that_is_not_a_lower_case_identifier" {
+  command = plan
+
+  variables {
+    database_schema = "Sc-X"
+  }
+
+  expect_failures = [var.database_schema]
 }
