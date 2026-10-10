@@ -189,14 +189,35 @@ AS $$
     SELECT a FROM fbx_history_guard.armed a ORDER BY a.armed_id DESC LIMIT 1
 $$;
 
+-- Objects in the service schema, looked up in the catalogs by name. Unlike
+-- to_regclass() and to_regprocedure(), this needs no USAGE on the schema,
+-- which a non-superuser admin (Aurora rds_superuser) does not hold. NULL
+-- when the object does not exist.
+CREATE OR REPLACE FUNCTION fbx_history_guard.table_oid(relname name) RETURNS oid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT c.oid FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN fbx_history_guard.settings s ON n.nspname = s.schema_name
+     WHERE c.relname = table_oid.relname AND c.relkind IN ('r', 'p')
+$$;
+CREATE OR REPLACE FUNCTION fbx_history_guard.function_oid(proname name) RETURNS oid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT p.oid FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      JOIN fbx_history_guard.settings s ON n.nspname = s.schema_name
+     WHERE p.proname = function_oid.proname AND p.pronargs = 0
+$$;
+
 -- product_history and product, in that order (NULL entries until deployed).
 CREATE OR REPLACE FUNCTION fbx_history_guard.protected_tables() RETURNS oid[]
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path = pg_catalog, pg_temp
 AS $$
-    SELECT ARRAY[to_regclass(format('%I.product_history', s.schema_name))::oid,
-                 to_regclass(format('%I.product', s.schema_name))::oid]
-      FROM fbx_history_guard.settings s
+    SELECT ARRAY[fbx_history_guard.table_oid('product_history'), fbx_history_guard.table_oid('product')]
 $$;
 
 -- pg_inherits rows that make product or product_history a parent or a
@@ -219,13 +240,12 @@ CREATE OR REPLACE FUNCTION fbx_history_guard.current_state(OUT protected_oids oi
     SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
-    s      text := (SELECT schema_name FROM fbx_history_guard.settings);
-    hist   oid := to_regclass(format('%I.product_history', s));
-    prod   oid := to_regclass(format('%I.product', s));
-    rec    oid := to_regprocedure(format('%I.product_history_record()', s));
-    app    oid := to_regprocedure(format('%I.product_history_append_only()', s));
-    ins    oid := to_regprocedure(format('%I.product_history_insert_guard()', s));
-    trn    oid := to_regprocedure(format('%I.product_truncate_refused()', s));
+    hist   oid := fbx_history_guard.table_oid('product_history');
+    prod   oid := fbx_history_guard.table_oid('product');
+    rec    oid := fbx_history_guard.function_oid('product_history_record');
+    app    oid := fbx_history_guard.function_oid('product_history_append_only');
+    ins    oid := fbx_history_guard.function_oid('product_history_insert_guard');
+    trn    oid := fbx_history_guard.function_oid('product_truncate_refused');
     writer oid := (SELECT oid FROM pg_roles WHERE rolname = 'open_products_catalog_history_writer');
     trgs   oid[];
     funcs  oid[];
@@ -353,7 +373,7 @@ DECLARE
     owner  text;
 BEGIN
     SELECT pg_get_userbyid(c.relowner) INTO owner
-      FROM pg_class c WHERE c.oid = to_regclass(format('%I.product_history', s));
+      FROM pg_class c WHERE c.oid = fbx_history_guard.table_oid('product_history');
     IF owner IS NULL THEN
         RAISE EXCEPTION 'product_history guard: %.product_history does not exist (deploy first)', s;
     END IF;
