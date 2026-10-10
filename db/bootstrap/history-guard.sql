@@ -79,7 +79,33 @@ BEGIN
     END IF;
 END
 $$;
-ALTER ROLE open_products_catalog_history_writer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+-- Clear only the attributes that are set. On PostgreSQL 16 a role that is not a true
+-- superuser (the Aurora admin is rds_superuser, not SUPERUSER) may not name SUPERUSER in
+-- ALTER ROLE at all, even NOSUPERUSER, and needs CREATEDB / CREATEROLE itself to name those;
+-- a fixed ALTER ROLE ... NOSUPERUSER failed the bootstrap there. The writer is created
+-- NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE, so normally only NOINHERIT is applied, once.
+-- A writer that is a superuser can only be cleared by a superuser: the bootstrap stops.
+DO $$
+DECLARE
+    r pg_roles%ROWTYPE;
+    changes text := '';
+BEGIN
+    SELECT * INTO r FROM pg_roles WHERE rolname = 'open_products_catalog_history_writer';
+    IF r.rolsuper THEN
+        IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+            RAISE EXCEPTION 'product_history guard: open_products_catalog_history_writer is a superuser; a superuser must run ALTER ROLE open_products_catalog_history_writer NOSUPERUSER before the bootstrap';
+        END IF;
+        changes := changes || ' NOSUPERUSER';
+    END IF;
+    IF r.rolcanlogin THEN changes := changes || ' NOLOGIN'; END IF;
+    IF r.rolcreatedb THEN changes := changes || ' NOCREATEDB'; END IF;
+    IF r.rolcreaterole THEN changes := changes || ' NOCREATEROLE'; END IF;
+    IF r.rolinherit THEN changes := changes || ' NOINHERIT'; END IF;
+    IF changes <> '' THEN
+        EXECUTE 'ALTER ROLE open_products_catalog_history_writer' || changes;
+    END IF;
+END
+$$;
 
 CREATE SCHEMA IF NOT EXISTS fbx_history_guard;
 REVOKE ALL ON SCHEMA fbx_history_guard FROM PUBLIC;

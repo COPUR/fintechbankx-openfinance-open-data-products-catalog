@@ -263,13 +263,45 @@ Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migratio
   runtime role, with the `db-app` credential and verified TLS, and exits
   non-zero unless the answer is `armed, intact`. It runs in two places:
   - CronJob `open-products-catalog-service-history-guard-check`, every 15
-    minutes (`historyGuardCheck.schedule`). A failed Job pages through the
-    platform's job-failure alert for the namespace. That alert is a platform
-    dependency (section 3).
+    minutes (`historyGuardCheck.schedule`). A failed Job pages through
+    `OpenProductsHistoryGuardCheckFailed`, a missing run through
+    `OpenProductsHistoryGuardCheckNotRunning` (alerts, below).
   - Job `open-products-catalog-service-history-guard-gate`, a Helm
     `pre-upgrade` hook. If the check fails, `helm upgrade` fails before
     anything is applied, and the failed Job stays for inspection. It is not a
     `pre-install` hook, because the guard is armed after the first install.
+
+- **Alerts** (platform observability commit 6e66584 defines them and routes
+  both to the Open Data Squad; the rule expressions live there and are not
+  checked from this repository):
+  - `OpenProductsHistoryGuardCheckFailed`: a check Job failed, from the
+    CronJob or the pre-upgrade gate. Either `verify()` did not answer
+    `armed, intact`, or the check could not get an answer (no connection,
+    TLS refused, credential, image). Response: read the failed Job's log
+    (`kubectl -n open-finance logs job/<job>`; the gate's Job stays for
+    inspection). If it names an answer, treat it as the integrity incident
+    above: open an incident, block releases to the environment, compare
+    `fbx_history_guard.event` and `fbx_history_guard.armed` with the change
+    tickets, and re-arm only under a ticket (break-glass, below). If it
+    names a connection, TLS or credential failure, fix that and re-run the
+    check by hand (`kubectl -n open-finance create job --from=cronjob/open-products-catalog-service-history-guard-check <name>`);
+    the alert clears on the next successful run. During a break-glass
+    release it keeps firing until step 4 (`arm`), by design.
+  - `OpenProductsHistoryGuardCheckNotRunning`: no check has run when it
+    should have, so the history is unwatched. Causes: the CronJob was
+    deleted or suspended, its schedule changed, its pods cannot start
+    (scheduling, image pull, egress) or `externalSecret.enabled=false`
+    removed it. Response: restore the CronJob from the chart
+    (`helm upgrade` of the current release), check
+    `kubectl -n open-finance get cronjob open-products-catalog-service-history-guard-check`
+    shows `SUSPEND False` and a recent `LAST SCHEDULE`, then run one check
+    by hand as above.
+  - The CronJob is never suspended in normal operation: the chart renders
+    no `spec.suspend` and has no value for it (the deploy/helm job asserts
+    this). Suspending it by hand (`kubectl patch ... suspend: true`) stops
+    the integrity check and is expected to page through
+    `OpenProductsHistoryGuardCheckNotRunning`; do it only under a change
+    ticket, and a `helm upgrade` resets it.
 
   Why this mechanism: it is the most reversible one that can reach the
   database. It is one chart template and one check mode in the service. It
@@ -279,7 +311,10 @@ Rehearsal: `scripts/migration/verify-migration.sh` (CI job `deploy/data-migratio
   A Terraform scheduled task would need its own IAM role, network access
   and secret wiring. The Deployability `deploy/helm` job checks the rendered
   CronJob and gate: the `aws` profile, the runtime credential only, the CA
-  bundle, no sidecar, no retry, and no app selector matching their pods.
+  bundle, no sidecar, no retry, no app selector matching their pods, both
+  pods keeping `app.kubernetes.io/name` and `app.kubernetes.io/component`
+  (the mesh selects their Aurora egress on them, mesh d2ccacc), and no
+  `spec.suspend` on the CronJob.
   `OpenProductsPostgresIT` proves the check fails against the real guard
   when it is disarmed or changed.
 - **Releases**: migrations that do not touch `product_history`, its
@@ -376,10 +411,11 @@ service, not returning traffic to the monolith.
 - The DBA bootstrap in section 2 (three roles) done before the first deploy.
 - The scheduled history-guard integrity check (`fbx_history_guard.verify()`
   must return `armed, intact`) is a **release blocker**. The chart's CronJob
-  and pre-upgrade gate (section 2.3) are built, but they page only through
-  the platform's job-failure alert for the `open-finance` namespace
-  (kube-state-metrics `kube_job_status_failed`), which the platform must
-  route to the Open Data Squad. If a namespace default-deny is in place, the
+  and pre-upgrade gate (section 2.3) are built; they page through
+  `OpenProductsHistoryGuardCheckFailed` and
+  `OpenProductsHistoryGuardCheckNotRunning` (platform observability 6e66584
+  routes both to the Open Data Squad; section 2.3 says what each means and
+  the response). If a namespace default-deny is in place, the
   check pods need the same Aurora egress as the service. They share its
   `app.kubernetes.io/name` and service account but run without a sidecar.
   Owner: Open Data Squad; the alert routing is a platform dependency.
@@ -462,7 +498,7 @@ service, not returning traffic to the monolith.
 - [x] Container image, Helm chart, Terraform checked in the Deployability workflow
 - [ ] Real catalogue CSV signed off by the product owner
 - [x] Scheduled history-guard integrity check built: chart CronJob plus pre-upgrade release gate (section 2.3); proved red against a disarmed or changed guard in `OpenProductsPostgresIT`
-- [ ] The check running and paging in each environment (platform job-failure alert routed to the Open Data Squad); a failed `verify()` blocks every release to that environment
+- [ ] The check running and paging in each environment (`OpenProductsHistoryGuardCheckFailed` and `OpenProductsHistoryGuardCheckNotRunning`, routed to the Open Data Squad by platform observability 6e66584); a failed `verify()` blocks every release to that environment
 - [ ] Guard armed after the first deploy in each environment (`verify()` returns `armed, intact`); none armed today, nothing is deployed
 - [ ] terraform-modules Aurora 16 drill: role grants by `rds_superuser`, replica-mode refusal, pgaudit object audit, no writer membership left after `arm()` by `rds_superuser`
 - [ ] Gateway route switched (platform)
