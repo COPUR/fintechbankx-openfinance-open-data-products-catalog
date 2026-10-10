@@ -1,3 +1,55 @@
+{{- /*
+Platform datasource/TLS guard, vendored unchanged as _fbx_helpers.tpl (source, commit, path and sha256 in
+its header; platform chart README, "Vendoring the guard"). The adapter maps every
+value of this chart that feeds one of the guard's routes; a key left out is never checked:
+- config: .Values.config (ConfigMap, envFrom of the migrate init container, the service and
+  the history guard check pods).
+- extraEnv: .Values.extraEnv as a list ({name, value} entries; the map form is converted),
+  refused whole by configmap.yaml since the chart renders none. No env value of the
+  templates is interpolated from values (all literals or secretKeyRefs), so there is nothing
+  else to pass. SPRING_PROFILES_ACTIVE (aws) and FBX_DEPLOYED are chart-rendered literals
+  and are not passed: the guard refuses every spring.profiles.* name it is given.
+- envFrom, extraEnvFrom: no such values; mapped so that a value set there (which no template
+  renders) is refused rather than ignored.
+- javaToolOptions: the chart has no such value and renders none; a value set there is refused
+  below. JVM options can only come from config.*, where the guard checks JAVA_TOOL_OPTIONS,
+  JDK_JAVA_OPTIONS and _JAVA_OPTIONS.
+- externalSecret.data / extraData as values: the chart renders its own entries only; a value
+  set there is refused below rather than ignored.
+- databaseCa: databaseCaBundle, always mounted (enabled), so DB_URL must carry
+  sslrootcert=<mountPath>/<key>.
+- kafka.runtime: "" (the service has no Kafka client; a Kafka protocol key in config then
+  fails the render).
+- externalSecret: data = the entries externalsecret.yaml renders (db and db-migration),
+  dataFrom = any dataFrom it renders plus .Values.externalSecret.dataFrom (refused).
+*/ -}}
+{{- $extraEnv := list -}}
+{{- if kindIs "map" .Values.extraEnv -}}
+{{- range $name, $value := .Values.extraEnv -}}
+{{- $extraEnv = append $extraEnv (dict "name" $name "value" (toString $value)) -}}
+{{- end -}}
+{{- else -}}
+{{- $extraEnv = .Values.extraEnv | default list -}}
+{{- end -}}
+{{- $secrets := fromYaml (include "products.renderedSecretData" (dict "root" . "template" "externalsecret.yaml")) -}}
+{{- if .Values.javaToolOptions -}}
+{{- fail "javaToolOptions is not supported by this chart (it renders no JAVA_TOOL_OPTIONS of its own); set config.JAVA_TOOL_OPTIONS, which the guard checks" -}}
+{{- end -}}
+{{- range $k := list "data" "extraData" -}}
+{{- if index ($.Values.externalSecret | default dict) $k -}}
+{{- fail (printf "externalSecret.%s is not supported by this chart: it renders its own ExternalSecret entries (templates/externalsecret.yaml), which the guard checks" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- include "fbx.guard" (dict "Values" (dict
+      "config" .Values.config
+      "extraEnv" $extraEnv
+      "envFrom" .Values.envFrom
+      "extraEnvFrom" .Values.extraEnvFrom
+      "javaToolOptions" ""
+      "databaseCa" (dict "enabled" true "mountPath" .Values.databaseCaBundle.mountPath "key" .Values.databaseCaBundle.key)
+      "kafka" (dict "runtime" "")
+      "externalSecret" (dict "enabled" true "data" ($secrets.data | default list)
+        "dataFrom" (concat ($secrets.dataFrom | default list) (.Values.externalSecret.dataFrom | default list))))) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,7 +64,7 @@ metadata:
   {{- end }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.replicaCount | int }}
   {{- end }}
   revisionHistoryLimit: 5
   strategy:
@@ -42,10 +94,10 @@ spec:
         traffic.sidecar.istio.io/excludeOutboundPorts: {{ .Values.networkPolicy.databasePort | quote }}
         {{- end }}
         prometheus.io/scrape: "true"
-        prometheus.io/port: {{ .Values.service.managementPort | quote }}
+        prometheus.io/port: {{ .Values.service.managementPort | toString | quote }}
         prometheus.io/path: /actuator/prometheus
     spec:
-      serviceAccountName: {{ .Values.serviceAccount.name }}
+      serviceAccountName: {{ .Values.serviceAccount.name | quote }}
       terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
@@ -55,13 +107,13 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       topologySpreadConstraints:
-        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+        - maxSkew: {{ .Values.topologySpread.maxSkew | int }}
           topologyKey: topology.kubernetes.io/zone
           whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
               {{- include "products.selectorLabels" . | nindent 14 }}
-        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+        - maxSkew: {{ .Values.topologySpread.maxSkew | int }}
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
@@ -72,8 +124,8 @@ spec:
         # Flyway as the schema owner, then exit (OPEN_PRODUCTS_MIGRATE_ONLY).
         # Replicas starting together are serialised by Flyway's lock.
         - name: migrate
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ printf "%s:%s" (required "image.repository is required" .Values.image.repository) (required "image.tag is required" .Values.image.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           envFrom:
             - configMapRef:
                 name: {{ include "products.name" . }}
@@ -114,18 +166,18 @@ spec:
             - name: tmp
               mountPath: /tmp
             - name: rds-ca-bundle
-              mountPath: {{ .Values.databaseCaBundle.mountPath }}
+              mountPath: {{ .Values.databaseCaBundle.mountPath | quote }}
               readOnly: true
       {{- end }}
       containers:
         - name: open-products-catalog-service
-          image: "{{ required "image.repository is required" .Values.image.repository }}:{{ required "image.tag is required" .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ printf "%s:%s" (required "image.repository is required" .Values.image.repository) (required "image.tag is required" .Values.image.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           ports:
             - name: http
-              containerPort: {{ .Values.service.port }}
+              containerPort: {{ .Values.service.port | int }}
             - name: management
-              containerPort: {{ .Values.service.managementPort }}
+              containerPort: {{ .Values.service.managementPort | int }}
           envFrom:
             - configMapRef:
                 name: {{ include "products.name" . }}
@@ -181,7 +233,7 @@ spec:
             - name: tmp
               mountPath: /tmp
             - name: rds-ca-bundle
-              mountPath: {{ .Values.databaseCaBundle.mountPath }}
+              mountPath: {{ .Values.databaseCaBundle.mountPath | quote }}
               readOnly: true
       volumes:
         - name: tmp
@@ -189,7 +241,7 @@ spec:
         # Platform trust-manager bundle; JDBC verifies Aurora's certificate with it.
         - name: rds-ca-bundle
           configMap:
-            name: {{ .Values.databaseCaBundle.configMapName }}
+            name: {{ .Values.databaseCaBundle.configMapName | quote }}
             items:
-              - key: {{ .Values.databaseCaBundle.key }}
-                path: {{ .Values.databaseCaBundle.key }}
+              - key: {{ .Values.databaseCaBundle.key | quote }}
+                path: {{ .Values.databaseCaBundle.key | quote }}

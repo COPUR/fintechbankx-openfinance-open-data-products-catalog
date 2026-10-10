@@ -49,9 +49,12 @@
 {{- if regexMatch "(?i)^spring[._-]?config[._-]?(import|location|additional[._-]?location|name)" $e.name }}
 {{- fail (printf "%s %s" $e.where $deniedMsg) }}
 {{- end }}
-{{- /* spring.kafka.* and spring.ssl.*: an SSL bundle could replace the trust anchors; this service has no Kafka client. */}}
-{{- if regexMatch "(?i)^spring[._-]?(kafka|ssl)[._-]" $e.name }}
-{{- fail (printf "%s is not allowed: spring.kafka.* and spring.ssl.* are not set through values (an SSL bundle could replace the trust anchors)" $e.where) }}
+{{- /* spring.kafka.*: this service has no Kafka client. spring.ssl.* (an SSL bundle could replace the
+       trust anchors) is refused by the vendored platform guard in deployment.yaml
+       ((?i)^spring[._-]?ssl([._-]|$) and any ssl[._-]?bundle name, a superset of the rule this
+       chart had). */}}
+{{- if regexMatch "(?i)^spring[._-]?kafka[._-]" $e.name }}
+{{- fail (printf "%s is not allowed: spring.kafka.* is not set through values (this service has no Kafka client)" $e.where) }}
 {{- end }}
 {{- /* FBX_DEPLOYED is the chart-owned marker that enforces the startup TLS assertion. */}}
 {{- if eq (regexReplaceAll "[^A-Z0-9]" (upper $e.name) "") "FBXDEPLOYED" }}
@@ -88,8 +91,9 @@
 {{- $_ := required "config.DB_URL is required (deploy/terraform output jdbc_url)" .Values.config.DB_URL }}
 {{- /* Parsed the way PgJDBC reads it (round 7, as in the consent, payee and atm charts): the URL is
        jdbc:postgresql:// with nothing before it (DatabaseTlsEnvironmentPostProcessor accepts nothing
-       else), exactly one '?', nothing that looks like a parameter before it, and no percent-encoded
-       '=' or '&' in the query, allow-listed values included. */}}
+       else), exactly one '?' and nothing that looks like a parameter before it. No percent-encoded
+       '=' or '&' in the query, allow-listed values included, is checked identically by the
+       vendored platform guard (fbx.validateJdbcUrl, deployment.yaml), which renders first. */}}
 {{- $url := toString .Values.config.DB_URL }}
 {{- if not (hasPrefix "jdbc:postgresql://" $url) }}
 {{- fail "config.DB_URL must start with jdbc:postgresql:// (no leading space, no other driver or wrapper; deploy/terraform output jdbc_url)" }}
@@ -99,9 +103,6 @@
 {{- end }}
 {{- if regexMatch "[=&;%]" (index (splitList "?" $url) 0) }}
 {{- fail "config.DB_URL: nothing that looks like a parameter ('=', '&', ';' or '%') may come before the '?'" }}
-{{- end }}
-{{- if regexMatch "(?i)%(3d|26)" (index (splitList "?" $url) 1) }}
-{{- fail "config.DB_URL must not percent-encode '=' or '&' (%3D, %26) in the query, allow-listed values included" }}
 {{- end }}
 {{- /* Aurora's certificate is verified against the platform RDS CA bundle (platform contract, Database CA bundle). */}}
 {{- $ca := printf "sslrootcert=%s/%s" .Values.databaseCaBundle.mountPath .Values.databaseCaBundle.key }}
@@ -139,6 +140,6 @@ data:
   {{- range $key, $value := .Values.config }}
   {{- /* Empty values are left out so application.yml defaults apply instead of "". */}}
   {{- if $value }}
-  {{ $key }}: {{ $value | quote }}
+  {{ $key | quote }}: {{ $value | quote }}
   {{- end }}
   {{- end }}

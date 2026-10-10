@@ -35,6 +35,28 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.3
+      - name: Vendored platform guard is unchanged (header sha256) and included once in the workload template
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          file="$chart/templates/_fbx_helpers.tpl"
+          # The header names source, commit, path and sha256; the sha256 covers everything after the
+          # first line that is exactly '*/}}' (the unchanged platform file).
+          want="$(sed -n 's/^sha256: *\([0-9a-f]\{64\}\)$/\1/p' "$file" | head -n 1)"
+          test -n "$want" || { echo "$file: no sha256 line in the header"; exit 1; }
+          grep -qx 'commit: a4f0072' "$file" || { echo "$file: header must name commit a4f0072"; exit 1; }
+          got="$(awk 'f {print} !f && $0 == "*/}}" {f=1}' "$file" | sha256sum | cut -d ' ' -f 1)"
+          if [ "$got" != "$want" ]; then
+            echo "$file: body sha256 $got, header records $want: re-copy the platform file unchanged"; exit 1
+          fi
+          # fbx.guard is included exactly once, in the workload template, before its first apiVersion:.
+          workload="$chart/templates/deployment.yaml"
+          n="$(grep -l 'include "fbx.guard"' "$chart"/templates/* | grep -cv '_fbx_helpers.tpl$' || true)"
+          [ "$n" = 1 ] || { echo "include \"fbx.guard\" must be in exactly one template (found $n)"; exit 1; }
+          [ "$(grep -c 'include "fbx.guard"' "$workload")" = 1 ] || { echo "$workload must include fbx.guard exactly once"; exit 1; }
+          guard="$(grep -n 'include "fbx.guard"' "$workload" | cut -d: -f1)"
+          api="$(grep -n '^apiVersion:' "$workload" | head -n 1 | cut -d: -f1)"
+          [ "$guard" -lt "$api" ] || { echo "$workload: fbx.guard must be included before the first apiVersion: (line $guard, apiVersion line $api)"; exit 1; }
+          echo "$file body sha256 $got; fbx.guard included once, line $guard of $workload"
       - name: Lint and render chart
         run: |
           chart=deploy/helm/open-products-catalog-service
@@ -140,7 +162,9 @@ jobs:
               echo "chart rendered with config.DB_URL=$url"
               exit 1
             fi
-            grep -q "sslmode=verify-full" tls.err
+            # The vendored guard (deployment.yaml) renders before configmap.yaml's strict parse, so the
+            # message names either the mode or the mounted bundle.
+            grep -qE "sslmode=verify-full|sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem exactly once" tls.err
           done
       - name: Rendering fails for a repeated sslmode or sslrootcert
         run: |
@@ -156,7 +180,8 @@ jobs:
               echo "chart rendered with config.DB_URL=$url"
               exit 1
             fi
-            grep -q "exactly once" tls2.err
+            # The vendored guard renders first: "exactly once", or "in lower case" for SSLMODE.
+            grep -qE "exactly once|must spell SSLMODE in lower case" tls2.err
           done
       - name: Rendering fails for any JDBC parameter that is not explicitly allowed
         run: |
@@ -170,7 +195,8 @@ jobs:
               echo "chart rendered with config.DB_URL=$base&$extra"
               exit 1
             fi
-            grep -q "not allowed" param.err
+            # sslfactory, sslhostnameverifier and service: the vendored guard's "must not set" (it renders first).
+            grep -qE "not allowed|must not set (sslfactory|sslhostnameverifier|service)" param.err
           done
           # An explicitly allowed parameter renders; an ssl* or service parameter never does.
           helm template ci "$chart" $common --set "config.DB_URL=$base&connectTimeout=5" \
@@ -180,7 +206,7 @@ jobs:
             echo "chart rendered an allow-listed sslfactory"
             exit 1
           fi
-          grep -q "not allowed" param.err
+          grep -q "must not set sslfactory" param.err
       - name: Rendering fails for a malformed DB_URL and for datasource, Flyway, Liquibase, R2DBC or JVM overrides in config
         run: |
           # Same rules as consent, payee and atm (strict parse after cicd-templates 13ca2c6
@@ -268,7 +294,14 @@ jobs:
                      spring.ssl.bundle.jks.x.truststore.location FBX_DEPLOYED fbx.deployed Fbx-Deployed; do
             v="$keys/$(printf 'config %s' "$key" | tr -c 'A-Za-z0-9._-' '_').yaml"
             printf 'config:\n  %s: x\n' "$key" > "$v"
-            must_fail "is not allowed" -f "$v"
+            # The vendored guard renders first; with no Kafka client (kafka.runtime "") it refuses a
+            # Kafka protocol key for that reason and an endpoint identification other than https.
+            case "$key" in
+              SPRING_KAFKA_SECURITY_PROTOCOL) expect="is set but kafka.runtime is empty" ;;
+              *ENDPOINT_IDENTIFICATION_ALGORITHM) expect="must be https" ;;
+              *) expect="is not allowed" ;;
+            esac
+            must_fail "$expect" -f "$v"
             v="$keys/$(printf 'extraEnv %s' "$key" | tr -c 'A-Za-z0-9._-' '_').yaml"
             printf 'extraEnv:\n  - name: %s\n    value: x\n' "$key" > "$v"
             must_fail "extraEnv" -f "$v"
@@ -330,14 +363,15 @@ jobs:
               echo "chart rendered with config.$key"
               exit 1
             fi
-            grep -q "config location" override.err || { cat override.err; exit 1; }
+            # The vendored guard renders first and names spring.config.* / SPRING_APPLICATION_JSON itself.
+            grep -qE "config location|is not allowed: a spring.config|APPLICATION_JSON is not allowed: it can redirect" override.err || { cat override.err; exit 1; }
           done
           printf 'config:\n  DB_URL: "%s"\nextraEnv:\n  - name: SPRING_CONFIG_IMPORT\n    value: "optional:file:/tmp/x.yaml"\n' "$url" > override-values.yaml
           if helm template ci "$chart" $common -f override-values.yaml > /dev/null 2> override.err; then
             echo "chart rendered with extraEnv SPRING_CONFIG_IMPORT"
             exit 1
           fi
-          grep -q "config location" override.err || { cat override.err; exit 1; }
+          grep -qE "config location|extraEnv must not set SPRING_CONFIG_IMPORT" override.err || { cat override.err; exit 1; }
           rm -f override-values.yaml
           # The default render sets none of them.
           if grep -niE 'spring[._]config[._]|spring_application_json|configtree' rendered.yaml; then
@@ -359,21 +393,21 @@ jobs:
           must_refuse() {
             desc="$1"; expected="$2"; shift 2
             if out="$(helm template ci "$chart" $common "$@" 2>&1)"; then echo "$desc must be refused"; exit 1; fi
-            echo "$out" | grep -q "$expected" || { echo "$desc failed for another reason: $out"; exit 1; }
+            echo "$out" | grep -qE "$expected" || { echo "$desc failed for another reason: $out"; exit 1; }
           }
           for name in SPRING_PROFILES_ACTIVE spring.profiles.active Spring-Profiles-Include SPRING_PROFILES_DEFAULT \
                       spring_profiles_group_aws SPRING_PROFILESACTIVE; do
-            must_refuse "config.$name" 'startup TLS assertion' -f "$(values "  $name: local")"
-            must_refuse "extraEnv $name" 'startup TLS assertion' -f "$(values 'extraEnv:' "  - name: $name" '    value: local')"
+            must_refuse "config.$name" 'startup TLS assertion|is not allowed: a profile' -f "$(values "  $name: local")"
+            must_refuse "extraEnv $name" 'startup TLS assertion|must not set .*: a profile' -f "$(values 'extraEnv:' "  - name: $name" '    value: local')"
           done
-          must_refuse "extraEnv map SPRING_PROFILES_ACTIVE" 'startup TLS assertion' -f "$(values 'extraEnv:' '  SPRING_PROFILES_ACTIVE: local')"
+          must_refuse "extraEnv map SPRING_PROFILES_ACTIVE" 'startup TLS assertion|must not set SPRING_PROFILES_ACTIVE .*: a profile' -f "$(values 'extraEnv:' '  SPRING_PROFILES_ACTIVE: local')"
           for name in SPRING_APPLICATION_JSON spring.application.json; do
-            must_refuse "config.$name" 'SPRING_APPLICATION_JSON' -f "$(values "  $name: '{\"spring\":{\"profiles\":{\"active\":\"local\"}}}'")"
+            must_refuse "config.$name" 'SPRING_APPLICATION_JSON|config.spring.application.json is not allowed' -f "$(values "  $name: '{\"spring\":{\"profiles\":{\"active\":\"local\"}}}'")"
           done
           for name in JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS JAVA_OPTS java.tool.options; do
-            must_refuse "config.$name with spring.profiles" 'startup TLS assertion' -f "$(values "  $name: -Dspring.profiles.active=local")"
-            must_refuse "config.$name with SPRING_PROFILES" 'startup TLS assertion' -f "$(values "  $name: -DSPRING_PROFILES_INCLUDE=local")"
-            must_refuse "extraEnv $name with spring.profiles" 'startup TLS assertion' -f "$(values 'extraEnv:' "  - name: $name" '    value: -Dspring-profiles-active=local')"
+            must_refuse "config.$name with spring.profiles" 'startup TLS assertion|must not mention .*spring.profiles' -f "$(values "  $name: -Dspring.profiles.active=local")"
+            must_refuse "config.$name with SPRING_PROFILES" 'startup TLS assertion|must not mention .*spring.profiles' -f "$(values "  $name: -DSPRING_PROFILES_INCLUDE=local")"
+            must_refuse "extraEnv $name with spring.profiles" 'startup TLS assertion|must not mention .*spring.profiles' -f "$(values 'extraEnv:' "  - name: $name" '    value: -Dspring-profiles-active=local')"
           done
           # JVM options that do not touch profiles still render.
           helm template ci "$chart" $common -f "$(values '  JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70')" > /dev/null
@@ -386,6 +420,86 @@ jobs:
           if [ "$names" -eq 0 ] || [ "$names" -ne "$wanted" ] || [ "$names" -ne "$aws" ]; then
             echo "rendered profile settings must be the chart's own SPRING_PROFILES_ACTIVE=aws: $got"; exit 1
           fi
+      - name: Vendored guard refuses on every adapter route, and interpolated keys and values stay in place
+        run: |
+          # README "Vendoring the guard" steps 2-4 (cicd-templates a4f0072): the adapter in
+          # deployment.yaml maps config, extraEnv (list or map form), envFrom, extraEnvFrom,
+          # databaseCa, kafka.runtime and the rendered ExternalSecrets (no env value of the templates is
+          # interpolated from values: all literals or secretKeyRefs); each
+          # case keeps the guard's message so it cannot pass because the render failed for another reason.
+          chart=deploy/helm/open-products-catalog-service
+          good='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
+          base="--set image.repository=ci/x --set image.tag=x --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=$good"
+          failed=0
+          must_fail() {  # <expected text in the error> <helm args...>
+            local expect="$1"; shift
+            if helm template ci "$chart" $base "$@" > /dev/null 2> guard.err; then
+              echo "chart rendered with: $*"; failed=1
+            elif ! grep -q -- "$expect" guard.err; then
+              echo "render failed for another reason than '$expect' with: $*"; cat guard.err; failed=1
+            fi
+          }
+          work="$(mktemp -d)"
+          # Template interpolation: a key with a newline would open further keys the checks never see.
+          printf 'config:\n  "X\\nSPRING_CONFIG_IMPORT": "optional:file:/tmp/x.yml"\n' > "$work/config-key-newline.yaml"
+          must_fail 'is not a ConfigMap key' -f "$work/config-key-newline.yaml"
+          printf 'config:\n  "X: y\\n  SPRING_DATASOURCE_URL": "x"\n' > "$work/config-key-colon.yaml"
+          must_fail 'is not a ConfigMap key' -f "$work/config-key-colon.yaml"
+          # The ExternalSecret remote keys come from values (--set-file outranks --set).
+          printf 'ci/x\n  property: x/db-app' > "$work/remote-key"
+          must_fail 'must not contain a control character' --set-file "externalSecret.remoteSecretName=$work/remote-key"
+          printf 'ci/x\n  property: x/db-migration' > "$work/remote-key"
+          must_fail 'must not contain a control character' --set-file "externalSecret.migrationRemoteSecretName=$work/remote-key"
+          # '$(' reaches no env value of the templates here; it is refused in DB_URL and extraEnv.
+          must_fail "config.DB_URL must not contain" --set-string "config.DB_URL=$good&ApplicationName=\$(X)" --set 'databaseUrlAllowedParams={ApplicationName}'
+          # Routes the chart does not render are refused rather than ignored.
+          must_fail 'envFrom is not supported' --set 'envFrom[0].configMapRef.name=x'
+          must_fail 'extraEnvFrom is not supported' --set 'extraEnvFrom[0].secretRef.name=x'
+          must_fail 'externalSecret.dataFrom is not supported' --set 'externalSecret.dataFrom[0].extract.key=x'
+          must_fail 'javaToolOptions is not supported' --set-string 'javaToolOptions=-XX:MaxRAMPercentage=70'
+          must_fail 'externalSecret.data is not supported' --set 'externalSecret.data[0].secretKey=X'
+          must_fail 'externalSecret.extraData is not supported' --set 'externalSecret.extraData[0].secretKey=X'
+          # No Kafka client (kafka.runtime ""): a Kafka protocol key in config fails the render.
+          must_fail 'config.KAFKA_SECURITY_PROTOCOL is set but kafka.runtime is empty' --set config.KAFKA_SECURITY_PROTOCOL=SSL
+          must_fail 'config.X_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM must be https' --set-string config.X_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM=
+          # Must pass: quoted values with a newline stay one value; no key or container field is added.
+          helm template ci "$chart" $base > "$work/baseline.yaml"
+          cat > "$work/hostile.yaml" <<'VALUES'
+          image:
+            tag: "x\"\n          args: [\"--spring.config.import=file:/tmp/x.yml\"]"
+          config:
+            OPEN_PRODUCTS_SEED_ENABLED: "aud\nSPRING_CONFIG_IMPORT: file:/tmp/x.yml"
+          databaseCaBundle:
+            configMapName: "rds-ca-bundle\n  optional: true"
+          VALUES
+          # --set outranks -f, so the hostile render takes image.tag from the file only.
+          helm template ci "$chart" ${base/--set image.tag=x/} -f "$work/hostile.yaml" > "$work/hostile-out.yaml"
+          python3 - "$work/baseline.yaml" "$work/hostile-out.yaml" <<'PY'
+          import sys, yaml
+          def load(p):
+              return {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(open(p)) if d}
+          base, bad = load(sys.argv[1]), load(sys.argv[2])
+          assert base.keys() == bad.keys(), "a hostile value added or removed a document"
+          for key, d in base.items():
+              if key[0] not in ("Deployment", "Job", "CronJob"):
+                  continue
+              pod = (lambda x: x["spec"]["jobTemplate"]["spec"]["template"]["spec"] if key[0] == "CronJob" else x["spec"]["template"]["spec"])
+              spec, other = pod(d), pod(bad[key])
+              assert spec.keys() == other.keys(), f"{key}: pod spec fields changed"
+              for c, o in zip(spec.get("initContainers", []) + spec["containers"], other.get("initContainers", []) + other["containers"]):
+                  assert c.keys() == o.keys(), f"{key}: container fields changed: {sorted(set(o) ^ set(c))}"
+                  assert [e["name"] for e in c.get("env", [])] == [e["name"] for e in o.get("env", [])], f"{key}: env names changed"
+                  assert o["image"].startswith("ci/x:x\"\n"), f"{key}: image tag not kept as one value"
+              vols = {v["name"]: v for v in other["volumes"]}
+              assert vols["rds-ca-bundle"]["configMap"].keys() == {"name", "items"}, f"{key}: configMap volume fields changed"
+          cm = next(d for (k, _), d in bad.items() if k == "ConfigMap")
+          cm0 = next(d for (k, _), d in base.items() if k == "ConfigMap")
+          assert cm["data"].keys() == cm0["data"].keys(), "ConfigMap keys changed"
+          assert cm["data"]["OPEN_PRODUCTS_SEED_ENABLED"] == "aud\nSPRING_CONFIG_IMPORT: file:/tmp/x.yml", "config value not kept as one value"
+          print("hostile values stay single quoted values: no added keys, env entries or container fields")
+          PY
+          rm -rf "$work" guard.err
+          exit $failed
       - name: The chart renders the deployment marker FBX_DEPLOYED=true on every container that runs the TLS check
         run: |
           # DatabaseTlsEnvironmentPostProcessor enforces with FBX_DEPLOYED whatever the profiles (aws
@@ -426,7 +540,7 @@ jobs:
           # ConfigMap rds-ca-bundle (key global-bundle.pem), published by trust-manager (platform contract).
           # migrate, the service, the history guard CronJob and the release gate Job.
           grep -q "name: rds-ca-bundle$" rendered.yaml
-          test "$(grep -c 'mountPath: /etc/fintechbankx/rds-ca$' rendered.yaml)" -eq 4
+          test "$(grep -c 'mountPath: "/etc/fintechbankx/rds-ca"$' rendered.yaml)" -eq 4
       - name: App pods and every selector carry app.kubernetes.io/component=service
         run: |
           # cicd-templates 335a345: component=service keeps Service, PDB, NetworkPolicy,

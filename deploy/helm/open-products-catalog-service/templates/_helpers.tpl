@@ -23,7 +23,7 @@ app.kubernetes.io/component: service
 app.kubernetes.io/version: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
 app.kubernetes.io/part-of: fintechbankx-open-finance
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-fintechbankx.io/service-id: svc-of-open-products-catalog
+fintechbankx.io/service-id: "svc-of-open-products-catalog"
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
 
@@ -49,7 +49,7 @@ app.kubernetes.io/component: history-guard-check
 app.kubernetes.io/version: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
 app.kubernetes.io/part-of: fintechbankx-open-finance
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-fintechbankx.io/service-id: svc-of-open-products-catalog
+fintechbankx.io/service-id: "svc-of-open-products-catalog"
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
 
@@ -61,7 +61,7 @@ metadata:
   annotations:
     sidecar.istio.io/inject: "false"
 spec:
-  serviceAccountName: {{ .Values.serviceAccount.name }}
+  serviceAccountName: {{ .Values.serviceAccount.name | quote }}
   restartPolicy: Never
   securityContext:
     runAsNonRoot: true
@@ -72,8 +72,8 @@ spec:
       type: RuntimeDefault
   containers:
     - name: history-guard-check
-      image: "{{ required "image.repository is required" .Values.image.repository }}:{{ required "image.tag is required" .Values.image.tag }}"
-      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      image: {{ printf "%s:%s" (required "image.repository is required" .Values.image.repository) (required "image.tag is required" .Values.image.tag) | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
       envFrom:
         - configMapRef:
             name: {{ include "products.name" . }}
@@ -106,15 +106,45 @@ spec:
         - name: tmp
           mountPath: /tmp
         - name: rds-ca-bundle
-          mountPath: {{ .Values.databaseCaBundle.mountPath }}
+          mountPath: {{ .Values.databaseCaBundle.mountPath | quote }}
           readOnly: true
   volumes:
     - name: tmp
       emptyDir: {}
     - name: rds-ca-bundle
       configMap:
-        name: {{ .Values.databaseCaBundle.configMapName }}
+        name: {{ .Values.databaseCaBundle.configMapName | quote }}
         items:
-          - key: {{ .Values.databaseCaBundle.key }}
-            path: {{ .Values.databaseCaBundle.key }}
+          - key: {{ .Values.databaseCaBundle.key | quote }}
+            path: {{ .Values.databaseCaBundle.key | quote }}
+{{- end -}}
+
+{{/*
+ExternalSecret entries exactly as <template> renders them, in the shape fbx.guard reads
+(secretKey, property, remoteSecretName), plus any dataFrom: the adapter in deployment.yaml
+passes what the chart writes, so a secretKey or remote key added to a template is checked
+without a second list to keep in step. A document that does not parse fails the render.
+Arguments: dict "root" (.), "template" (file name under templates/). Returns YAML
+{data: [...], dataFrom: [...]}.
+*/}}
+{{- define "products.renderedSecretData" -}}
+{{- $data := list -}}
+{{- $dataFrom := list -}}
+{{- range $doc := splitList "\n---" (include (print .root.Template.BasePath "/" .template) .root) -}}
+{{- if regexMatch "(?m)^[^#\\s]" $doc -}}
+{{- $o := fromYaml $doc -}}
+{{- if hasKey $o "Error" -}}
+{{- fail (printf "%s does not render as YAML: %s" $.template $o.Error) -}}
+{{- end -}}
+{{- if eq (toString $o.kind) "ExternalSecret" -}}
+{{- $spec := $o.spec | default dict -}}
+{{- range $e := ($spec.data | default list) -}}
+{{- $ref := $e.remoteRef | default dict -}}
+{{- $data = append $data (dict "secretKey" $e.secretKey "property" $ref.property "remoteSecretName" $ref.key) -}}
+{{- end -}}
+{{- $dataFrom = concat $dataFrom ($spec.dataFrom | default list) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toYaml (dict "data" $data "dataFrom" $dataFrom) -}}
 {{- end -}}
