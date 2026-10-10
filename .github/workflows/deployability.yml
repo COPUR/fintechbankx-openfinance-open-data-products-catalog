@@ -636,6 +636,37 @@ jobs:
             --set historyGuardCheck.breakGlassTicket=CHG-0001 > break-glass.yaml
           python3 guard-check.py break-glass.yaml CHG-0001
           rm -f guard-check.py break-glass.yaml
+      - name: History guard check pods keep the mesh egress labels, and the CronJob is never suspended
+        run: |
+          # Mesh d2ccacc selects the check pods' Aurora egress on app.kubernetes.io/name and
+          # app.kubernetes.io/component, so both stay on the CronJob's and the gate Job's pod templates.
+          # The CronJob is never suspended: no spec.suspend is rendered and no value can set one.
+          chart=deploy/helm/open-products-catalog-service
+          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          common="$common --set config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
+          for extra in "" "-f $chart/values-dev.yaml"; do
+            helm template ci "$chart" $common $extra > history-guard-check.yaml
+            python3 - history-guard-check.yaml <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+          want = {"app.kubernetes.io/name": "open-products-catalog-service",
+                  "app.kubernetes.io/component": "history-guard-check"}
+          cron = [d for d in docs if d["kind"] == "CronJob"]
+          gate = [d for d in docs if d["kind"] == "Job" and d["metadata"]["name"].endswith("-history-guard-gate")]
+          assert len(cron) == 1 and len(gate) == 1, f"expected one CronJob and one gate Job, got {len(cron)} and {len(gate)}"
+          pods = {"CronJob": cron[0]["spec"]["jobTemplate"]["spec"]["template"], "gate Job": gate[0]["spec"]["template"]}
+          for where, pod in pods.items():
+              labels = pod["metadata"].get("labels") or {}
+              for key, value in want.items():
+                  assert labels.get(key) == value, f"{where} pod must carry {key}={value} (mesh egress selector), got {labels.get(key)!r}"
+          assert cron[0]["spec"].get("suspend") in (None, False), f"CronJob must not be suspended, got suspend={cron[0]['spec'].get('suspend')!r}"
+          print("history guard check pods carry name and component; CronJob not suspended")
+          PY
+          done
+          if grep -rn "suspend" "$chart/templates" "$chart"/values*.yaml; then
+            echo "no template or value may set the history guard CronJob's spec.suspend"; exit 1
+          fi
+          rm -f history-guard-check.yaml
       - name: Rendered ConfigMap has no empty or identity-provider keys
         run: |
           if grep -nE '^  OIDC_|: ""$' rendered.yaml; then

@@ -33,7 +33,8 @@
 #      append-only, and arm/disarm/hand-back/re-arm keep the owner without
 #      INSERT on the history, column grants included (has_any_column_privilege),
 #  14. checks a non-superuser CREATEROLE admin (the Aurora rds_superuser
-#      stand-in) can hand back and arm, and keeps no SET or INHERIT
+#      stand-in) applies the bootstrap's writer attributes (PostgreSQL 16:
+#      no SUPERUSER clause), can hand back and arm, and keeps no SET or INHERIT
 #      membership in the history writer afterwards (review 5).
 # There is no monolith data to backfill (ADR-0001), so there is no source DB.
 #
@@ -629,6 +630,24 @@ BEGIN
 END
 $$;
 SQL
+# PostgreSQL 16: a role that is not a true superuser may not name SUPERUSER in ALTER ROLE,
+# not even NOSUPERUSER, so a fixed "ALTER ROLE <writer> ... NOSUPERUSER ..." stopped the
+# bootstrap on Aurora. The bootstrap's writer-attribute statements (after the writer's CREATE
+# ROLE block, before the guard schema) run here as the non-superuser admin; vanilla PostgreSQL
+# keeps CREATE EVENT TRIGGER superuser-only, so the whole file cannot. INHERIT is set first so
+# that an attribute actually has to be cleared.
+awk '/^CREATE SCHEMA IF NOT EXISTS fbx_history_guard;/ {exit} f {print} /CREATE ROLE open_products_catalog_history_writer NOLOGIN;/ {g=1} g && !f && /^\$\$;$/ {f=1}' \
+  "$root/db/bootstrap/history-guard.sql" > "$work/writer-attributes.sql"
+grep -q "ALTER ROLE open_products_catalog_history_writer" "$work/writer-attributes.sql" \
+  || { echo "FAIL the bootstrap's writer attribute statements were not found" >&2; exit 1; }
+psql_q -d postgres -c "ALTER ROLE $writer INHERIT"
+as_admin psql_q -d "$db" -f "$work/writer-attributes.sql" > /dev/null 2> "$work/attributes.err" \
+  || { cat "$work/attributes.err" >&2; echo "FAIL the non-superuser admin could not apply the bootstrap's writer attributes" >&2; exit 1; }
+check "the non-superuser admin applies the bootstrap's writer attributes (PostgreSQL 16)" \
+  "SELECT rolsuper OR rolcanlogin OR rolcreatedb OR rolcreaterole OR rolinherit FROM pg_roles WHERE rolname = '$writer'" "f"
+as_admin psql_q -d "$db" -f "$work/writer-attributes.sql" > /dev/null
+check "and re-applies them as a no-op" \
+  "SELECT rolsuper OR rolcanlogin OR rolcreatedb OR rolcreaterole OR rolinherit FROM pg_roles WHERE rolname = '$writer'" "f"
 # hand-back and arm both move product_history_record() between owner and writer as the admin.
 as_admin psql_q -d "$db" -c "SELECT fbx_history_guard.hand_back_history_writer('rehearsal: non-superuser hand-back')" > /dev/null 2> "$work/admin.err" \
   || { cat "$work/admin.err" >&2; exit 1; }
