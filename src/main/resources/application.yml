@@ -42,6 +42,9 @@ spring:
 openproducts:
   # true: migrate the schema and exit (Helm init container); see MigrateOnlyConfiguration.
   migrate-only: ${OPEN_PRODUCTS_MIGRATE_ONLY:false}
+  # true: run fbx_history_guard.verify() and exit, non-zero unless 'armed, intact'
+  # (Helm CronJob and pre-upgrade hook); see HistoryGuardCheckConfiguration.
+  history-guard-check: ${OPEN_PRODUCTS_HISTORY_GUARD_CHECK:false}
   catalog:
     # postgres (default) is the only runtime store; tests may switch to in-memory.
     store: postgres
