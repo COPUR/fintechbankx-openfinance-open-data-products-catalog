@@ -157,6 +157,89 @@ class OpenProductsPostgresIT {
             .containsExactly("INSERT:-:IT-DEL", "DELETE:IT-DEL:-");
     }
 
+    /**
+     * V5: TRUNCATE fires no row trigger, so it would remove products without a
+     * DELETE row in the history. It is refused for every role, the superuser
+     * included, also under session_replication_role = replica (fires ALWAYS).
+     */
+    @Test
+    void truncateOfProductIsRefusedAlsoForASuperuserInReplicaMode() {
+        inRolledBackTransaction(statement -> assertThatThrownBy(() -> statement.execute("TRUNCATE " + SCHEMA + ".product"))
+            .hasMessageContaining("TRUNCATE is refused"));
+        inRolledBackTransaction(statement -> {
+            statement.execute("SET LOCAL session_replication_role = replica");
+            assertThatThrownBy(() -> statement.execute("TRUNCATE " + SCHEMA + ".product"))
+                .hasMessageContaining("TRUNCATE is refused");
+        });
+
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM " + SCHEMA + ".product WHERE product_id LIKE 'SAMPLE-%'", Integer.class))
+            .isEqualTo(4);
+    }
+
+    /**
+     * V5: the insert guard also requires the inserting role to own
+     * product_history_record(). Here, as after arm(), a NOLOGIN writer owns it;
+     * a trigger the superuser puts on another table runs at trigger depth 2 as
+     * the superuser and is refused, also in replica mode, while the history
+     * trigger on product still records as the writer. Rolled back.
+     */
+    @Test
+    void historyInsertThroughAnotherTablesTriggerIsRefusedEvenForASuperuser() {
+        String user = jdbc.queryForObject("SELECT current_user", String.class);
+        inRolledBackTransaction(statement -> {
+            statement.execute("CREATE ROLE it_history_writer NOLOGIN");
+            statement.execute("GRANT USAGE ON SCHEMA " + SCHEMA + " TO it_history_writer");
+            statement.execute("GRANT INSERT ON " + SCHEMA + ".product_history TO it_history_writer");
+            statement.execute("ALTER FUNCTION " + SCHEMA + ".product_history_record() OWNER TO it_history_writer");
+
+            statement.execute("INSERT INTO " + SCHEMA + ".product (product_id, product_type, segment, name, currency,"
+                + " monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from, updated_at)"
+                + " VALUES ('IT-WRITER', 'PCA', 'SME', 'Product IT-WRITER', 'AED', 1.00, 'AED', 0.00, 'ACTIVE',"
+                + " '2026-01-01T00:00:00Z', '2026-03-10T00:00:00Z')");
+            try (var rows = statement.executeQuery("SELECT count(*) FROM " + SCHEMA + ".product_history"
+                    + " WHERE product_id = 'IT-WRITER' AND operation = 'INSERT'")) {
+                rows.next();
+                assertThat(rows.getInt(1)).isEqualTo(1);
+            }
+
+            statement.execute("CREATE TABLE " + SCHEMA + ".it_forge (id int)");
+            statement.execute("CREATE FUNCTION " + SCHEMA + ".it_forge_fn() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN"
+                + " INSERT INTO " + SCHEMA + ".product_history (product_id, operation, new_row, changed_by, login_role,"
+                + " application_name, transaction_id, changed_at) VALUES ('IT-FORGED-SU', 'INSERT', '{}', 'x', 'x', 'x', 0, now());"
+                + " RETURN NULL; END $f$");
+            statement.execute("CREATE TRIGGER trg_it_forge AFTER INSERT ON " + SCHEMA + ".it_forge"
+                + " FOR EACH ROW EXECUTE FUNCTION " + SCHEMA + ".it_forge_fn()");
+            statement.execute("ALTER TABLE " + SCHEMA + ".it_forge ENABLE ALWAYS TRIGGER trg_it_forge");
+            statement.execute("SET LOCAL session_replication_role = replica");
+            assertThatThrownBy(() -> statement.execute("INSERT INTO " + SCHEMA + ".it_forge VALUES (1)"))
+                .hasMessageContaining("only the history trigger on product may write it")
+                .hasMessageContaining("INSERT as " + user + " refused");
+        });
+
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM " + SCHEMA + ".product_history"
+            + " WHERE product_id IN ('IT-WRITER', 'IT-FORGED-SU')", Integer.class)).isZero();
+    }
+
+    /** Runs the body on one connection in a transaction that is always rolled back. */
+    private void inRolledBackTransaction(SqlBody body) {
+        jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            boolean autoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try (var statement = connection.createStatement()) {
+                body.run(statement);
+            } finally {
+                connection.rollback();
+                connection.setAutoCommit(autoCommit);
+            }
+            return null;
+        });
+    }
+
+    @FunctionalInterface
+    private interface SqlBody {
+        void run(java.sql.Statement statement) throws java.sql.SQLException;
+    }
+
     private void insert(String id, String type, String status, String from, String to) {
         jdbc.update("INSERT INTO " + SCHEMA + ".product (product_id, product_type, segment, name, currency,"
                 + " monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from, effective_to, updated_at)"
@@ -177,7 +260,8 @@ class OpenProductsPostgresIT {
                 + ".flyway_schema_history WHERE success AND version IS NOT NULL ORDER BY installed_rank", String.class);
 
         assertThat(applied).containsExactly("1:create product catalogue", "2:product history and roles",
-            "3:history operator identity", "4:history insert guard and deletes");
+            "3:history operator identity", "4:history insert guard and deletes",
+            "5:product truncate refused and writer only inserts");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM " + SCHEMA
             + ".product WHERE product_id IN ('SAMPLE-PCA-001', 'SAMPLE-SAV-001', 'SAMPLE-SME-LOAN-01', 'SAMPLE-SME-PCA-01')", Integer.class))
             .isEqualTo(4);
