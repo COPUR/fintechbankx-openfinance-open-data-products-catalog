@@ -83,6 +83,11 @@ spec:
             # Startup refuses a database URL without verified TLS (DatabaseTlsEnvironmentPostProcessor).
             - name: SPRING_PROFILES_ACTIVE
               value: aws
+            # Chart-owned deployment marker (never from values; config.FBX_DEPLOYED is refused):
+            # with it DatabaseTlsEnvironmentPostProcessor is enforced whatever the profiles, and
+            # refuses to start without the aws profile or with a local profile.
+            - name: FBX_DEPLOYED
+              value: "true"
             - name: OPEN_PRODUCTS_MIGRATE_ONLY
               value: "true"
             - name: SPRING_MAIN_WEB_APPLICATION_TYPE
@@ -132,6 +137,11 @@ spec:
             # Startup refuses a database URL without verified TLS (DatabaseTlsEnvironmentPostProcessor).
             - name: SPRING_PROFILES_ACTIVE
               value: aws
+            # Chart-owned deployment marker (never from values; config.FBX_DEPLOYED is refused):
+            # with it DatabaseTlsEnvironmentPostProcessor is enforced whatever the profiles, and
+            # refuses to start without the aws profile or with a local profile.
+            - name: FBX_DEPLOYED
+              value: "true"
             {{- if .Values.externalSecret.enabled }}
             # The schema was migrated by the init container; the runtime role
             # (SELECT on product only) could not run Flyway anyway.

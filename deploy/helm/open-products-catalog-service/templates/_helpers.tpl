@@ -82,6 +82,11 @@ spec:
       env:
         - name: SPRING_PROFILES_ACTIVE
           value: aws
+        # Chart-owned deployment marker (never from values; config.FBX_DEPLOYED is refused):
+        # with it DatabaseTlsEnvironmentPostProcessor is enforced whatever the profiles, and
+        # refuses to start without the aws profile or with a local profile.
+        - name: FBX_DEPLOYED
+          value: "true"
         - name: OPEN_PRODUCTS_HISTORY_GUARD_CHECK
           value: "true"
         - name: SPRING_MAIN_WEB_APPLICATION_TYPE

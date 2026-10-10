@@ -18,8 +18,9 @@
        _helpers.tpl:105-121): no spring.datasource.*, spring.flyway.*, spring.liquibase.* or
        spring.r2dbc.* key in any spelling (SPRING_DATASOURCE_USERNAME excepted), no key naming a
        JDBC URL, an SSL factory or a host name verifier, no jdbc: value outside config.DB_URL, and
-       no JVM option variable (_JAVA_OPTIONS included) that mentions jdbc, ssl, spring, flyway,
-       liquibase, datasource, r2dbc or application.json. */}}
+       no JVM option variable (_JAVA_OPTIONS included) that mentions jdbc, ssl, spring, kafka, flyway,
+       liquibase, datasource, r2dbc or application.json, or reads options from a file ('@' argument
+       file, -XX:VMOptionsFile, -XX:Flags; cicd-templates 2caa48f fbx.validateJvmOptions). */}}
 {{- $datasourceMsg := "can redirect or override the datasource past the config.DB_URL check (the JDBC URL goes in config.DB_URL; SPRING_DATASOURCE_USERNAME is the only spring.datasource.* key allowed)" }}
 {{- $jvmOptions := list "JAVATOOLOPTIONS" "JDKJAVAOPTIONS" "JAVAOPTIONS" "JAVAOPTS" }}
 {{- $entries := list }}
@@ -43,6 +44,19 @@
 {{- if regexMatch $denied (upper (regexReplaceAll "[^A-Za-z0-9]" $e.name "_")) }}
 {{- fail (printf "%s %s" $e.where $deniedMsg) }}
 {{- end }}
+{{- /* Any suffix and spelling, and spring.config.name too (cicd-templates 2caa48f fbx.datasourceOverrideName):
+       SPRING_CONFIG_IMPORT_0, spring.config.import[0], SPRING_CONFIG_NAME. */}}
+{{- if regexMatch "(?i)^spring[._-]?config[._-]?(import|location|additional[._-]?location|name)" $e.name }}
+{{- fail (printf "%s %s" $e.where $deniedMsg) }}
+{{- end }}
+{{- /* spring.kafka.* and spring.ssl.*: an SSL bundle could replace the trust anchors; this service has no Kafka client. */}}
+{{- if regexMatch "(?i)^spring[._-]?(kafka|ssl)[._-]" $e.name }}
+{{- fail (printf "%s is not allowed: spring.kafka.* and spring.ssl.* are not set through values (an SSL bundle could replace the trust anchors)" $e.where) }}
+{{- end }}
+{{- /* FBX_DEPLOYED is the chart-owned marker that enforces the startup TLS assertion. */}}
+{{- if eq (regexReplaceAll "[^A-Z0-9]" (upper $e.name) "") "FBXDEPLOYED" }}
+{{- fail (printf "%s is not allowed: FBX_DEPLOYED is the chart-owned deployment marker that enforces the startup TLS assertion; values never set it" $e.where) }}
+{{- end }}
 {{- $normalized := regexReplaceAll "[^A-Z0-9]" (upper $e.name) "" }}
 {{- if hasPrefix "SPRINGPROFILES" $normalized }}
 {{- fail (printf "%s must not be set: %s" $e.where $profileMsg) }}
@@ -63,8 +77,8 @@
 {{- if regexMatch "(?i)spring[^a-z0-9]?profiles" $e.value }}
 {{- fail (printf "%s must not set spring.profiles: %s" $e.where $profileMsg) }}
 {{- end }}
-{{- if regexMatch "(?i)jdbc|ssl|spring|flyway|liquibase|datasource|r2dbc|application[._-]?json" $e.value }}
-{{- fail (printf "%s must not mention jdbc, ssl, spring, flyway, liquibase, datasource, r2dbc or application.json: JVM system properties %s" $e.where $datasourceMsg) }}
+{{- if regexMatch "(?i)jdbc|ssl|spring|kafka|flyway|liquibase|datasource|r2dbc|application[._-]?json|(^|\\s)@|-XX:(VMOptionsFile|Flags)" $e.value }}
+{{- fail (printf "%s must not mention jdbc, ssl, spring, kafka, flyway, liquibase, datasource, r2dbc or application.json, nor read options from a file ('@' argument file, -XX:VMOptionsFile, -XX:Flags): JVM system properties %s" $e.where $datasourceMsg) }}
 {{- end }}
 {{- end }}
 {{- end }}
