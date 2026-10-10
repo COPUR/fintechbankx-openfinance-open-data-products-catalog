@@ -31,7 +31,10 @@
 #      trigger included),
 #  13. checks the guard covers table and column privileges, its own state is
 #      append-only, and arm/disarm/hand-back/re-arm keep the owner without
-#      INSERT on the history, column grants included (has_any_column_privilege).
+#      INSERT on the history, column grants included (has_any_column_privilege),
+#  14. checks a non-superuser CREATEROLE admin (the Aurora rds_superuser
+#      stand-in) can hand back and arm, and keeps no SET or INHERIT
+#      membership in the history writer afterwards (review 5).
 # There is no monolith data to backfill (ADR-0001), so there is no source DB.
 #
 # Needs psql and a superuser (it creates roles and a database), via the usual
@@ -45,6 +48,9 @@ schema="sc_of_open_products_catalog"
 owner="open_products_catalog_owner"
 app="open_products_catalog_app"
 importer="open_products_catalog_import"
+writer="open_products_catalog_history_writer"
+# Stand-in for the Aurora admin (rds_superuser): CREATEROLE, not a superuser.
+admin="open_products_rehearsal_admin"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -52,10 +58,12 @@ trap 'rm -rf "$work"' EXIT
 owner_secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 app_secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 import_secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+admin_secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 
 psql_q() { psql -X -q -v ON_ERROR_STOP=1 "$@"; }
 as_owner() { PGUSER="$owner" PGPASSWORD="$owner_secret" "$@"; }
 as_app() { PGUSER="$app" PGPASSWORD="$app_secret" "$@"; }
+as_admin() { PGUSER="$admin" PGPASSWORD="$admin_secret" "$@"; }
 # Stand-in for the AWS CLI: the import asks STS who the operator is.
 operator_arn="arn:aws:sts::111122223333:assumed-role/CatalogueOperator/rehearsal"
 mkdir -p "$work/bin"
@@ -110,6 +118,24 @@ denied() {
 
 echo "--- DBA bootstrap (runbook section 2)"
 psql_q -d postgres -c "DROP DATABASE IF EXISTS $db"
+# A previous run's admin stand-in, and any membership it granted, go first.
+psql_q -d postgres -v admin="$admin" <<'SQL'
+SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'admin') AS admin_left \gset
+\if :admin_left
+DO $$
+DECLARE
+    m record;
+BEGIN
+    FOR m IN SELECT r.rolname AS role_name, u.rolname AS member_name
+               FROM pg_auth_members a JOIN pg_roles r ON r.oid = a.roleid JOIN pg_roles u ON u.oid = a.member
+              WHERE a.grantor = (SELECT oid FROM pg_roles WHERE rolname = 'open_products_rehearsal_admin') LOOP
+        EXECUTE format('REVOKE %I FROM %I GRANTED BY open_products_rehearsal_admin', m.role_name, m.member_name);
+    END LOOP;
+END
+$$;
+DROP ROLE :"admin";
+\endif
+SQL
 for role in "$owner:$owner_secret" "$app:$app_secret" "$importer:$import_secret"; do
   name="${role%%:*}" secret="${role#*:}"
   psql_q -d postgres -v name="$name" -v secret="$secret" <<'SQL'
@@ -564,6 +590,78 @@ check "every break-glass step is recorded" \
 check "the arming log keeps every state" \
   "SELECT string_agg(is_armed::text, ',' ORDER BY armed_id) FROM fbx_history_guard.armed" "true,false,true"
 refused "re-armed guard refuses history DDL again" "COMMENT ON TABLE product_history IS 'x'"
+
+echo "--- the admin as a non-superuser (Aurora rds_superuser stand-in) arms the guard"
+# On Aurora the admin is not a superuser: it runs the bootstrap, so it owns the
+# guard's functions and tables, and it created the owner and writer roles, so it
+# holds ADMIN OPTION on them (PG16: INHERIT FALSE, SET FALSE). Vanilla
+# PostgreSQL keeps event triggers superuser-owned; they call the admin's functions.
+psql_q -d postgres -v admin="$admin" -v secret="$admin_secret" <<'SQL'
+CREATE ROLE :"admin" LOGIN CREATEROLE NOSUPERUSER PASSWORD :'secret';
+GRANT open_products_catalog_owner TO :"admin" WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
+GRANT open_products_catalog_history_writer TO :"admin" WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
+SQL
+psql_q -d "$db" -v admin="$admin" <<'SQL'
+GRANT CONNECT, CREATE ON DATABASE of_open_products_rehearsal TO :"admin";
+SELECT fbx_history_guard.disarm('rehearsal: hand the guard to a non-superuser admin') IS NOT NULL AS disarmed \gset
+SELECT set_config('fbx.rehearsal_admin', :'admin', false) IS NOT NULL AS ok \gset
+DO $$
+DECLARE
+    adm text := current_setting('fbx.rehearsal_admin');
+    o record;
+BEGIN
+    EXECUTE format('ALTER SCHEMA fbx_history_guard OWNER TO %I', adm);
+    FOR o IN SELECT c.oid::regclass AS rel FROM pg_class c
+              WHERE c.relnamespace = 'fbx_history_guard'::regnamespace AND c.relkind = 'r' LOOP
+        EXECUTE format('ALTER TABLE %s OWNER TO %I', o.rel, adm);
+    END LOOP;
+    FOR o IN SELECT p.oid::regprocedure AS fn FROM pg_proc p WHERE p.pronamespace = 'fbx_history_guard'::regnamespace LOOP
+        EXECUTE format('ALTER FUNCTION %s OWNER TO %I', o.fn, adm);
+    END LOOP;
+END
+$$;
+SQL
+# hand-back and arm both move product_history_record() between owner and writer as the admin.
+as_admin psql_q -d "$db" -c "SELECT fbx_history_guard.hand_back_history_writer('rehearsal: non-superuser hand-back')" > /dev/null 2> "$work/admin.err" \
+  || { cat "$work/admin.err" >&2; exit 1; }
+check "the non-superuser admin handed the recording function back" \
+  "SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = '$schema.product_history_record()'::regprocedure" "$owner"
+as_admin psql_q -d "$db" -c "SELECT fbx_history_guard.arm('rehearsal: non-superuser admin arms')" > /dev/null 2> "$work/admin.err" \
+  || { cat "$work/admin.err" >&2; exit 1; }
+check "the non-superuser admin armed the guard" "SELECT fbx_history_guard.verify()" "armed, intact"
+check "arm() moved the recording function to the writer" \
+  "SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = '$schema.product_history_record()'::regprocedure" "$writer"
+# Review probe (round 5): set_history_writer() made the admin a SET-capable
+# member of the writer and left it so; the admin could then write history
+# rows as the writer from a trigger on any table, and verify() stayed intact.
+admin_forge_sql="CREATE SCHEMA IF NOT EXISTS admin_forge;
+GRANT USAGE ON SCHEMA admin_forge TO $writer;
+CREATE TABLE admin_forge.src (id int);
+GRANT INSERT ON admin_forge.src TO $writer;
+CREATE FUNCTION admin_forge.forge() RETURNS trigger LANGUAGE plpgsql AS \$f\$
+BEGIN
+  INSERT INTO $schema.product_history ($history_cols) VALUES ('FORGED-ADMIN', 'INSERT', '{}', 'x', 'x', 'x', 0, now());
+  RETURN NULL;
+END \$f\$;
+CREATE TRIGGER trg_forge AFTER INSERT ON admin_forge.src FOR EACH ROW EXECUTE FUNCTION admin_forge.forge();
+SET ROLE $writer;
+INSERT INTO admin_forge.src VALUES (1);"
+if as_admin psql -X -q -v ON_ERROR_STOP=1 -d "$db" -c "$admin_forge_sql" 2> "$work/admin_forge.err"; then
+  echo "FAIL review probe: the admin wrote a history row as the history writer after arm()" >&2; exit 1
+fi
+grep -q "permission denied to set role \"$writer\"" "$work/admin_forge.err" || { cat "$work/admin_forge.err" >&2; exit 1; }
+echo "ok   review probe: after arm() the admin cannot act as the history writer"
+check "no forged admin row reached the history" "SELECT count(*) FROM $schema.product_history WHERE product_id = 'FORGED-ADMIN'" "0"
+check "the writer has no INHERIT or SET member after arm()" \
+  "SELECT count(*) FROM pg_auth_members WHERE roleid = '$writer'::regrole AND (inherit_option OR set_option)" "0"
+check "the admin keeps only ADMIN OPTION on the owner and the writer" \
+  "SELECT string_agg(roleid::regrole || ':' || admin_option || ':' || inherit_option || ':' || set_option, ',' ORDER BY roleid::regrole::text) FROM pg_auth_members WHERE member = '$admin'::regrole" \
+  "$owner:true:false:false,$writer:true:false:false"
+# ADMIN OPTION lets the admin grant itself the writer again: not prevented, but verify() reports it.
+as_admin psql_q -d "$db" -c "GRANT $writer TO $admin WITH INHERIT FALSE, SET TRUE"
+check "the admin re-granting itself the writer is reported" "SELECT fbx_history_guard.verify()" "CHANGED SINCE ARMED"
+as_admin psql_q -d "$db" -c "REVOKE $writer FROM $admin"
+check "guard intact again once the admin's grant is gone" "SELECT fbx_history_guard.verify()" "armed, intact"
 
 psql_q -d postgres -c "DROP DATABASE $db"
 echo "Migration, seed and import rehearsal passed."
