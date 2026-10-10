@@ -34,6 +34,10 @@
 --
 -- Re-runnable while DISARMED (one transaction). While armed it refuses to
 -- run: disarm first, re-run, arm.
+--
+-- The only psql features used are ON_ERROR_STOP and the optional schema
+-- variable below (psql -v schema=...); everything else is plain SQL, so the
+-- PostgreSQL integration tests apply this same file over JDBC.
 \set ON_ERROR_STOP on
 \if :{?schema}
 \else
@@ -42,15 +46,18 @@
 
 BEGIN;
 
-SELECT to_regprocedure('fbx_history_guard.verify()') IS NOT NULL AS guard_installed \gset
-\if :guard_installed
-SELECT fbx_history_guard.verify() IN ('armed, intact', 'CHANGED SINCE ARMED') AS guard_armed \gset
-\if :guard_armed
-DO $$ BEGIN
-    RAISE EXCEPTION 'product_history guard: armed; run fbx_history_guard.disarm(<ticket>) before re-running the bootstrap, then arm again';
-END $$;
-\endif
-\endif
+DO $$
+DECLARE
+    answer text;
+BEGIN
+    IF to_regprocedure('fbx_history_guard.verify()') IS NOT NULL THEN
+        EXECUTE 'SELECT fbx_history_guard.verify()' INTO answer;
+        IF answer IN ('armed, intact', 'CHANGED SINCE ARMED') THEN
+            RAISE EXCEPTION 'product_history guard: armed; run fbx_history_guard.disarm(<ticket>) before re-running the bootstrap, then arm again';
+        END IF;
+    END IF;
+END
+$$;
 
 -- Disarmed here, so dropping the event triggers changes nothing; the old
 -- versions would otherwise run against the tables this script reshapes. They
@@ -58,10 +65,13 @@ END $$;
 DROP EVENT TRIGGER IF EXISTS fbx_history_guard_ddl;
 DROP EVENT TRIGGER IF EXISTS fbx_history_guard_drop;
 
-SELECT NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'open_products_catalog_history_writer') AS writer_missing \gset
-\if :writer_missing
-CREATE ROLE open_products_catalog_history_writer NOLOGIN;
-\endif
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'open_products_catalog_history_writer') THEN
+        CREATE ROLE open_products_catalog_history_writer NOLOGIN;
+    END IF;
+END
+$$;
 ALTER ROLE open_products_catalog_history_writer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
 
 CREATE SCHEMA IF NOT EXISTS fbx_history_guard;
@@ -156,12 +166,15 @@ REVOKE ALL ON ALL TABLES IN SCHEMA fbx_history_guard FROM PUBLIC;
 -- every write to the guard state logs an "AUDIT: OBJECT" line. No SELECT, so
 -- the scheduled verify() does not log. product_history gets its grant in
 -- set_history_writer(), before arm() records the fingerprint.
-SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_pgaudit') AS has_pgaudit_role \gset
-\if :has_pgaudit_role
-GRANT INSERT, UPDATE, DELETE ON fbx_history_guard.armed, fbx_history_guard.event TO rds_pgaudit;
-\else
-\warn 'role rds_pgaudit does not exist: object auditing of the guard state is not set up'
-\endif
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_pgaudit') THEN
+        GRANT INSERT, UPDATE, DELETE ON fbx_history_guard.armed, fbx_history_guard.event TO rds_pgaudit;
+    ELSE
+        RAISE WARNING 'role rds_pgaudit does not exist: object auditing of the guard state is not set up';
+    END IF;
+END
+$$;
 
 -- Latest arming state; is_armed false when there is none.
 CREATE OR REPLACE FUNCTION fbx_history_guard.state() RETURNS fbx_history_guard.armed
