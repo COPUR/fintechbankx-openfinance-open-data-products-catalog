@@ -236,6 +236,54 @@ jobs:
                      'JAVA_OPTS: -Djdbc.drivers=x.Evil'; do
             must_fail "config.${opt%%:*}" -f "$(values "  DB_URL: \"$url\"" "  $opt")"
           done
+          # Round 8 (cicd-templates 2caa48f): the strict-step helpers under the names this step uses.
+          good="$url"; base="$common"
+          # (h) JVM options that set spring.config.* / spring.profiles.* / Kafka properties or read
+          # options from a file ('@' argument file, -XX:VMOptionsFile, -XX:Flags), in every JVM
+          # option variable (cicd-templates 2caa48f fbx.validateJvmOptions); values go through a file
+          # so spaces and '@' reach the chart unchanged.
+          jvm="$(mktemp -d)"
+          for name in JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS JAVA_OPTS; do
+            for value in '-Dspring.config.import=optional:file:/tmp/x.yml' '-Dspring.profiles.active=local' \
+                         '-Dkafka.security.protocol=PLAINTEXT' '@/tmp/opts' '-Xmx1g @/tmp/opts' \
+                         '-XX:VMOptionsFile=/tmp/opts' '-XX:Flags=/tmp/flags'; do
+              v="$jvm/$(printf 'config %s=%s' "$name" "$value" | tr -c 'A-Za-z0-9._=-' '_').yaml"
+              printf 'config:\n  DB_URL: "%s"\n  %s: "%s"\n' "$good" "$name" "$value" > "$v"
+              must_fail "config.$name" -f "$v"
+            done
+          done
+          # JVM options that only size the heap still render.
+          printf 'config:\n  DB_URL: "%s"\n  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=70 -Xss1m"\n' "$good" > "$jvm/v.yaml"
+          helm template ci "$chart" $base -f "$jvm/v.yaml" > /dev/null
+          rm -rf "$jvm"
+          common="$common --set config.DB_URL=$url"
+          # Any suffix and spring.config.name (cicd-templates 2caa48f fbx.datasourceOverrideName),
+          # spring.kafka.* and spring.ssl.* (protocol, trust store, SSL bundles), and the chart-owned
+          # deployment marker FBX_DEPLOYED in any spelling. Keys go through a values file, so
+          # spring.config.import[0] stays one key.
+          keys="$(mktemp -d)"
+          for key in SPRING_CONFIG_IMPORT_0 "'spring.config.import[0]'" SPRING_CONFIG_LOCATION_0 SPRING_CONFIG_ADDITIONAL_LOCATION_0 \
+                     SPRING_CONFIG_NAME spring.config.name SPRING_KAFKA_SECURITY_PROTOCOL spring.kafka.bootstrap-servers \
+                     SPRING_KAFKA_PROPERTIES_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM SPRING_SSL_BUNDLE_PEM_RDS_TRUSTSTORE_CERTIFICATE \
+                     spring.ssl.bundle.jks.x.truststore.location FBX_DEPLOYED fbx.deployed Fbx-Deployed; do
+            v="$keys/$(printf 'config %s' "$key" | tr -c 'A-Za-z0-9._-' '_').yaml"
+            printf 'config:\n  %s: x\n' "$key" > "$v"
+            must_fail "is not allowed" -f "$v"
+            v="$keys/$(printf 'extraEnv %s' "$key" | tr -c 'A-Za-z0-9._-' '_').yaml"
+            printf 'extraEnv:\n  - name: %s\n    value: x\n' "$key" > "$v"
+            must_fail "extraEnv" -f "$v"
+          done
+          for name in JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS JAVA_OPTS; do
+            v="$keys/extraEnv_${name}_valueFrom.yaml"
+            printf 'extraEnv:\n  - name: %s\n    valueFrom:\n      secretKeyRef: {name: s, key: k}\n' "$name" > "$v"
+            must_fail "extraEnv" -f "$v"
+          done
+          rm -rf "$keys"
+          # Hikari settings that replace the checked URL or its TLS (also refused at startup).
+          for key in SPRING_DATASOURCE_HIKARI_JDBC_URL SPRING_DATASOURCE_HIKARI_DATASOURCEPROPERTIES_SSLFACTORY \
+                     spring.datasource.hikari.data-source-properties.sslmode; do
+            must_fail "config.$key" -f "$(values "  $key: x")"
+          done
           rm -rf "$work"
           exit $failed
       - name: Rendering fails unless each container gets its own database credential
@@ -338,6 +386,41 @@ jobs:
           if [ "$names" -eq 0 ] || [ "$names" -ne "$wanted" ] || [ "$names" -ne "$aws" ]; then
             echo "rendered profile settings must be the chart's own SPRING_PROFILES_ACTIVE=aws: $got"; exit 1
           fi
+      - name: The chart renders the deployment marker FBX_DEPLOYED=true on every container that runs the TLS check
+        run: |
+          # DatabaseTlsEnvironmentPostProcessor enforces with FBX_DEPLOYED whatever the profiles (aws
+          # required, no local, test or in-memory profile): migrate, the service, the history guard
+          # CronJob and the release gate Job. Rendered directly, never from values.
+          chart=deploy/helm/open-products-catalog-service
+          for np in false true; do
+            helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+              --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+              --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' \
+              --set networkPolicy.enabled=$np --set "networkPolicy.databaseCidrs={10.0.32.0/20}" > marker.yaml
+            python3 - marker.yaml "CronJob/history-guard-check,Deployment/migrate,Deployment/open-products-catalog-service,Job/history-guard-check" <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+          want = set(sys.argv[2].split(","))
+          containers = []
+          for d in docs:
+              spec = None
+              if d["kind"] in ("Deployment", "Job"):
+                  spec = d["spec"]["template"]["spec"]
+              elif d["kind"] == "CronJob":
+                  spec = d["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+              if spec:
+                  containers += [(f"{d['kind']}/{c['name']}", c) for c in spec.get("initContainers", []) + spec["containers"]]
+          assert {w for w, _ in containers} == want, f"expected containers {sorted(want)}, got {sorted(w for w, _ in containers)}"
+          for where, c in containers:
+              env = [e for e in c.get("env", []) if e["name"] == "FBX_DEPLOYED"]
+              assert env == [{"name": "FBX_DEPLOYED", "value": "true"}], f"{where} must set FBX_DEPLOYED=true once, as a literal, got {env}"
+          for cm in (d for d in docs if d["kind"] == "ConfigMap"):
+              assert not [k for k in (cm.get("data") or {}) if "".join(ch for ch in k.upper() if ch.isalnum()) == "FBXDEPLOYED"], \
+                  f"ConfigMap {cm['metadata']['name']} must not carry FBX_DEPLOYED"
+          print("FBX_DEPLOYED=true on " + ", ".join(sorted(w for w, _ in containers)))
+          PY
+          done
+          rm -f marker.yaml
       - name: Every database client container trusts the platform RDS CA bundle
         run: |
           # ConfigMap rds-ca-bundle (key global-bundle.pem), published by trust-manager (platform contract).

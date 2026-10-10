@@ -72,6 +72,39 @@ class DatabaseTlsEnvironmentPostProcessorTest {
             .doesNotThrowAnyException();
     }
 
+    @Test
+    void alsoChecksAHikariJdbcUrlThatReplacesTheDatasourceUrl() {
+        // Round 8: spring.datasource.hikari.jdbc-url is bound onto the pool after spring.datasource.url.
+        for (String url : new String[] {GOOD + "&sslmode=require", "jdbc:postgresql://elsewhere/x?sslmode=require"}) {
+            MockEnvironment environment = aws(GOOD).withProperty("spring.datasource.hikari.jdbc-url", url);
+            assertThatThrownBy(() -> processor.postProcessEnvironment(environment, new SpringApplication()))
+                .as(url).isInstanceOf(IllegalStateException.class)
+                .hasMessageStartingWith("spring.datasource.hikari.jdbc-url ");
+        }
+        assertThatCode(() -> processor.postProcessEnvironment(
+            aws(GOOD).withProperty("spring.datasource.hikari.jdbc-url", GOOD), new SpringApplication()))
+            .doesNotThrowAnyException();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"sslmode", "sslfactory", "sslrootcert", "SSLMODE", "service"})
+    void refusesHikariDataSourcePropertiesThatTouchTls(String key) {
+        // Round 8: driver properties outside the URL would override sslmode or the trust.
+        MockEnvironment environment = aws(GOOD).withProperty("spring.datasource.hikari.data-source-properties." + key, "x");
+        assertThatThrownBy(() -> processor.postProcessEnvironment(environment, new SpringApplication()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("spring.datasource.hikari.data-source-properties.")
+            .hasMessageContaining("is refused: TLS settings come only from the verified JDBC URL");
+    }
+
+    @Test
+    void acceptsHikariDataSourcePropertiesThatDoNotTouchTls() {
+        assertThatCode(() -> processor.postProcessEnvironment(
+            aws(GOOD).withProperty("spring.datasource.hikari.data-source-properties.ApplicationName", "products"),
+            new SpringApplication()))
+            .doesNotThrowAnyException();
+    }
+
     private static MockEnvironment aws(String url) {
         MockEnvironment environment = new MockEnvironment().withProperty("spring.datasource.url", url);
         environment.setActiveProfiles("aws");
