@@ -274,6 +274,71 @@ jobs:
               sys.exit(f"rendered.yaml has no {sorted(missing)}")
           print("component=service on the app pods and every selector")
           PY
+      - name: Every container runs under the aws profile, and the history guard check is scheduled and gates upgrades
+        run: |
+          chart=deploy/helm/open-products-catalog-service
+          cat > guard-check.py <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+          break_glass = sys.argv[2] if len(sys.argv) > 2 else ""
+          def env(c):
+              return {e["name"]: e.get("value") for e in c.get("env", [])}
+          def fail(msg):
+              sys.exit(msg)
+          deploy = next(d for d in docs if d["kind"] == "Deployment")
+          pod = deploy["spec"]["template"]["spec"]
+          for c in pod.get("initContainers", []) + pod["containers"]:
+              if env(c).get("SPRING_PROFILES_ACTIVE") != "aws":
+                  fail(f"container {c['name']} does not run under SPRING_PROFILES_ACTIVE=aws (startup TLS check)")
+          def check_pod(kind, tpl):
+              labels = tpl["metadata"]["labels"]
+              if labels.get("app.kubernetes.io/component") != "history-guard-check":
+                  fail(f"{kind} pods must carry app.kubernetes.io/component=history-guard-check: {labels}")
+              if str(labels.get("sidecar.istio.io/inject")) != "false":
+                  fail(f"{kind} pods must not get a sidecar (a Job with a sidecar never completes)")
+              spec = tpl["spec"]
+              if spec.get("restartPolicy") != "Never":
+                  fail(f"{kind} pods must not restart: one run, one answer")
+              (c,) = spec["containers"]
+              e = env(c)
+              want = {"OPEN_PRODUCTS_HISTORY_GUARD_CHECK": "true", "SPRING_PROFILES_ACTIVE": "aws",
+                      "SPRING_FLYWAY_ENABLED": "false", "SPRING_MAIN_WEB_APPLICATION_TYPE": "none"}
+              for k, v in want.items():
+                  if e.get(k) != v:
+                      fail(f"{kind} container env {k} must be {v}, got {e.get(k)}")
+              secrets = [s["secretRef"]["name"] for s in c.get("envFrom", []) if "secretRef" in s]
+              if secrets != ["open-products-catalog-service-db"]:
+                  fail(f"{kind} must use the runtime credential only (db-app), got {secrets}")
+              if not any(m["mountPath"] == "/etc/fintechbankx/rds-ca" for m in c.get("volumeMounts", [])):
+                  fail(f"{kind} must mount the RDS CA bundle")
+          crons = [d for d in docs if d["kind"] == "CronJob"]
+          if len(crons) != 1 or not crons[0]["spec"].get("schedule"):
+              fail("expected one scheduled history guard check CronJob")
+          check_pod("CronJob", crons[0]["spec"]["jobTemplate"]["spec"]["template"])
+          hooks = [d for d in docs if d["kind"] == "Job"]
+          if break_glass:
+              if hooks:
+                  fail("a break-glass release must not render the release gate")
+              if deploy["metadata"].get("annotations", {}).get("fintechbankx.io/history-guard-break-glass") != break_glass:
+                  fail("a break-glass release must record its ticket on the Deployment")
+          else:
+              if len(hooks) != 1:
+                  fail("expected one release-gate Job")
+              ann = hooks[0]["metadata"].get("annotations", {})
+              if ann.get("helm.sh/hook") != "pre-upgrade":
+                  fail(f"the release gate must be a pre-upgrade hook only (the guard is armed after the first install), got {ann.get('helm.sh/hook')}")
+              if hooks[0]["spec"].get("backoffLimit") != 0:
+                  fail("the release gate must not retry")
+              check_pod("release gate Job", hooks[0]["spec"]["template"])
+          print("aws profile on every container; history guard check scheduled" + ("; release gate skipped for " + break_glass if break_glass else " and gating upgrades"))
+          PY
+          python3 guard-check.py rendered.yaml
+          helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
+            --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' \
+            --set historyGuardCheck.breakGlassTicket=CHG-0001 > break-glass.yaml
+          python3 guard-check.py break-glass.yaml CHG-0001
+          rm -f guard-check.py break-glass.yaml
       - name: Rendered ConfigMap has no empty or identity-provider keys
         run: |
           if grep -nE '^  OIDC_|: ""$' rendered.yaml; then
