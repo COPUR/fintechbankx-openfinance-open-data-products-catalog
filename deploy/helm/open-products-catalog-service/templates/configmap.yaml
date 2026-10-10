@@ -13,7 +13,15 @@
        in any spelling (one from valueFrom cannot be inspected and is refused).
        SPRING_APPLICATION_JSON is refused above. The assertion has no enforce flag. */}}
 {{- $profileMsg := "the startup TLS assertion (DatabaseTlsEnvironmentPostProcessor) runs under the aws profile the chart renders on every container, which values cannot change" }}
-{{- $jvmOptions := list "JAVATOOLOPTIONS" "JDKJAVAOPTIONS" "JAVAOPTS" }}
+{{- /* Nothing in values reaches the datasource around config.DB_URL (round 7, as in the consent,
+       payee and atm charts; cicd-templates 13ca2c6 charts/fintechbankx-service/templates/
+       _helpers.tpl:105-121): no spring.datasource.*, spring.flyway.*, spring.liquibase.* or
+       spring.r2dbc.* key in any spelling (SPRING_DATASOURCE_USERNAME excepted), no key naming a
+       JDBC URL, an SSL factory or a host name verifier, no jdbc: value outside config.DB_URL, and
+       no JVM option variable (_JAVA_OPTIONS included) that mentions jdbc, ssl, spring, flyway,
+       liquibase, datasource, r2dbc or application.json. */}}
+{{- $datasourceMsg := "can redirect or override the datasource past the config.DB_URL check (the JDBC URL goes in config.DB_URL; SPRING_DATASOURCE_USERNAME is the only spring.datasource.* key allowed)" }}
+{{- $jvmOptions := list "JAVATOOLOPTIONS" "JDKJAVAOPTIONS" "JAVAOPTIONS" "JAVAOPTS" }}
 {{- $entries := list }}
 {{- range $key, $value := .Values.config }}
 {{- $entries = append $entries (dict "where" (printf "config.%s" $key) "name" (toString $key) "value" (toString $value) "literal" true) }}
@@ -39,6 +47,15 @@
 {{- if hasPrefix "SPRINGPROFILES" $normalized }}
 {{- fail (printf "%s must not be set: %s" $e.where $profileMsg) }}
 {{- end }}
+{{- if and (regexMatch "^SPRING(DATASOURCE|FLYWAY|LIQUIBASE|R2DBC)" $normalized) (ne $normalized "SPRINGDATASOURCEUSERNAME") }}
+{{- fail (printf "%s is not allowed: a spring.datasource.*, spring.flyway.*, spring.liquibase.* or spring.r2dbc.* setting %s" $e.where $datasourceMsg) }}
+{{- end }}
+{{- if regexMatch "JDBCURL|SSLFACTORY|SSLHOSTNAMEVERIFIER" $normalized }}
+{{- fail (printf "%s is not allowed: a setting naming a JDBC URL, an SSL factory or a host name verifier %s" $e.where $datasourceMsg) }}
+{{- end }}
+{{- if and (ne $e.where "config.DB_URL") (regexMatch "(?i)jdbc:" $e.value) }}
+{{- fail (printf "%s is not allowed: a jdbc: value %s" $e.where $datasourceMsg) }}
+{{- end }}
 {{- if has $normalized $jvmOptions }}
 {{- if not $e.literal }}
 {{- fail (printf "%s must be a literal value (valueFrom cannot be checked for spring.profiles): %s" $e.where $profileMsg) }}
@@ -46,12 +63,32 @@
 {{- if regexMatch "(?i)spring[^a-z0-9]?profiles" $e.value }}
 {{- fail (printf "%s must not set spring.profiles: %s" $e.where $profileMsg) }}
 {{- end }}
+{{- if regexMatch "(?i)jdbc|ssl|spring|flyway|liquibase|datasource|r2dbc|application[._-]?json" $e.value }}
+{{- fail (printf "%s must not mention jdbc, ssl, spring, flyway, liquibase, datasource, r2dbc or application.json: JVM system properties %s" $e.where $datasourceMsg) }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- if $extraEnv }}
 {{- fail "extraEnv is not supported by this chart: put non-secret settings under config (rendered into the ConfigMap and checked)" }}
 {{- end }}
 {{- $_ := required "config.DB_URL is required (deploy/terraform output jdbc_url)" .Values.config.DB_URL }}
+{{- /* Parsed the way PgJDBC reads it (round 7, as in the consent, payee and atm charts): the URL is
+       jdbc:postgresql:// with nothing before it (DatabaseTlsEnvironmentPostProcessor accepts nothing
+       else), exactly one '?', nothing that looks like a parameter before it, and no percent-encoded
+       '=' or '&' in the query, allow-listed values included. */}}
+{{- $url := toString .Values.config.DB_URL }}
+{{- if not (hasPrefix "jdbc:postgresql://" $url) }}
+{{- fail "config.DB_URL must start with jdbc:postgresql:// (no leading space, no other driver or wrapper; deploy/terraform output jdbc_url)" }}
+{{- end }}
+{{- if ne 2 (len (splitList "?" $url)) }}
+{{- fail "config.DB_URL needs exactly one '?' (deploy/terraform output jdbc_url)" }}
+{{- end }}
+{{- if regexMatch "[=&;%]" (index (splitList "?" $url) 0) }}
+{{- fail "config.DB_URL: nothing that looks like a parameter ('=', '&', ';' or '%') may come before the '?'" }}
+{{- end }}
+{{- if regexMatch "(?i)%(3d|26)" (index (splitList "?" $url) 1) }}
+{{- fail "config.DB_URL must not percent-encode '=' or '&' (%3D, %26) in the query, allow-listed values included" }}
+{{- end }}
 {{- /* Aurora's certificate is verified against the platform RDS CA bundle (platform contract, Database CA bundle). */}}
 {{- $ca := printf "sslrootcert=%s/%s" .Values.databaseCaBundle.mountPath .Values.databaseCaBundle.key }}
 {{- /* Each parameter exactly once (any case): the driver must read the value checked here. */}}
