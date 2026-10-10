@@ -21,7 +21,10 @@
 #      (review probes), and that the triggers and function bodies are intact,
 #  11. checks the history cannot be forged or bypassed by the owner: direct
 #      inserts into product_history are refused, deleting a product is
-#      recorded, and no new trigger on product may write the history,
+#      recorded, no new trigger on product may write the history, and no
+#      table may inherit from product or product_history or take either as
+#      a partition (CREATE TABLE ... INHERITS, ALTER TABLE ... INHERIT,
+#      ATTACH PARTITION),
 #  12. checks TRUNCATE of product is refused for every role, the admin
 #      included, also in replica mode (V5), and that only the NOLOGIN history
 #      writer may insert history rows (V5's insert guard, a superuser's
@@ -372,6 +375,27 @@ as_owner psql_q -d "$db" -c "SET search_path = $schema" \
 check "deleting a product is recorded with its last values" \
   "SELECT string_agg(operation || ':' || coalesce(old_row->>'name', '-') || ':' || coalesce(new_row->>'name', '-') || ':' || changed_by, ',' ORDER BY history_id) FROM $schema.product_history WHERE product_id = 'DEL-001'" \
   "INSERT:-:To delete:$owner,DELETE:To delete:-:$owner"
+# Review probes (round 5): a child table is read through its parent, and the
+# parent's row triggers do not fire for rows inserted into the child.
+history_cols="product_id, operation, new_row, changed_by, login_role, application_name, transaction_id, changed_at"
+refused "review probe: a child of product_history carries forged rows visible through the history" \
+  "CREATE TABLE forge_hist_child () INHERITS (product_history); INSERT INTO forge_hist_child (history_id, $history_cols) VALUES (900000001, 'FORGED-CHILD', 'INSERT', '{}', 'x', 'x', 'x', 0, now())"
+refused "review probe: a child of product adds rows the runtime role sees without history" \
+  "CREATE TABLE product_shadow () INHERITS (product); GRANT SELECT ON product_shadow TO $app; INSERT INTO product_shadow (product_id, product_type, segment, name, currency, monthly_fee_amount, monthly_fee_currency, annual_rate_percent, status, effective_from) VALUES ('SHADOW-001', 'PCA', 'RETAIL', 'Shadow', 'AED', 0.00, 'AED', 0.00, 'ACTIVE', '2026-05-01T00:00:00Z')"
+refused "ALTER TABLE ... INHERIT product_history on an existing table" \
+  "CREATE TABLE forge_inherit (LIKE product_history INCLUDING CONSTRAINTS); ALTER TABLE forge_inherit INHERIT product_history"
+refused "ALTER TABLE ... INHERIT product on an existing table" \
+  "CREATE TABLE shadow_inherit (LIKE product INCLUDING CONSTRAINTS); ALTER TABLE shadow_inherit INHERIT product"
+refused "attach product_history as a partition of another table" \
+  "CREATE TABLE forge_parent (LIKE product_history) PARTITION BY LIST (operation); ALTER TABLE forge_parent ATTACH PARTITION product_history DEFAULT"
+refused "attach product as a partition of another table" \
+  "CREATE TABLE shadow_parent (LIKE product) PARTITION BY LIST (status); ALTER TABLE shadow_parent ATTACH PARTITION product DEFAULT"
+check "no table inherits from or contains product or product_history" \
+  "SELECT count(*) FROM pg_inherits WHERE inhparent IN ('$schema.product'::regclass, '$schema.product_history'::regclass) OR inhrelid IN ('$schema.product'::regclass, '$schema.product_history'::regclass)" "0"
+check "every row read through product has a history row (none came through a child)" \
+  "SELECT count(*) FROM $schema.product p WHERE NOT EXISTS (SELECT 1 FROM $schema.product_history h WHERE h.product_id = p.product_id)" "0"
+check "no forged child row is visible through the history" \
+  "SELECT count(*) FROM $schema.product_history WHERE product_id = 'FORGED-CHILD' OR tableoid <> '$schema.product_history'::regclass" "0"
 
 echo "--- schema owner cannot tamper with the history (review probes)"
 integrity_sql="SELECT string_agg(t.tgname || ':' || t.tgenabled::text || ':' || md5(p.prosrc), ',' ORDER BY t.tgname)

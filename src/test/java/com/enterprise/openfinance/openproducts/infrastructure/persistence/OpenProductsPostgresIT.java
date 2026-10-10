@@ -220,6 +220,91 @@ class OpenProductsPostgresIT {
             + " WHERE product_id IN ('IT-WRITER', 'IT-FORGED-SU')", Integer.class)).isZero();
     }
 
+    /**
+     * Review probe (round 5): a table that inherits from product or
+     * product_history is read through its parent, and the parent's row
+     * triggers do not fire for rows inserted into the child. With the history
+     * guard (db/bootstrap/history-guard.sql) armed, every way of creating
+     * such a child, or of making either table a partition, is refused.
+     */
+    @Test
+    void armedGuardRefusesInheritanceFromTheProtectedTables() {
+        String history = SCHEMA + ".product_history";
+        String product = SCHEMA + ".product";
+        withArmedGuard(() -> {
+            assertThat(guardRefuses("CREATE TABLE " + SCHEMA + ".it_forge_child () INHERITS (" + history + ")"))
+                .contains("product_history guard");
+            assertThat(guardRefuses("CREATE TABLE " + SCHEMA + ".it_shadow_child () INHERITS (" + product + ")"))
+                .contains("product_history guard");
+            assertThat(guardRefuses("CREATE TABLE " + SCHEMA + ".it_forge_like (LIKE " + history + " INCLUDING CONSTRAINTS);"
+                + " ALTER TABLE " + SCHEMA + ".it_forge_like INHERIT " + history)).contains("product_history guard");
+            assertThat(guardRefuses("CREATE TABLE " + SCHEMA + ".it_shadow_like (LIKE " + product + " INCLUDING CONSTRAINTS);"
+                + " ALTER TABLE " + SCHEMA + ".it_shadow_like INHERIT " + product)).contains("product_history guard");
+            assertThat(guardRefuses("CREATE TABLE " + SCHEMA + ".it_forge_parent (LIKE " + history + ") PARTITION BY LIST (operation);"
+                + " ALTER TABLE " + SCHEMA + ".it_forge_parent ATTACH PARTITION " + history + " DEFAULT"))
+                .contains("product_history guard");
+
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM pg_inherits WHERE inhparent IN (?::regclass, ?::regclass)"
+                + " OR inhrelid IN (?::regclass, ?::regclass)", Integer.class, history, product, history, product)).isZero();
+            assertThat(jdbc.queryForObject("SELECT fbx_history_guard.verify()", String.class)).isEqualTo("armed, intact");
+        });
+    }
+
+    /**
+     * Defence in depth for the same probe: even if a child of product
+     * existed (guard disarmed), its rows, which have no history, are not
+     * served; the adapter reads ONLY product.
+     */
+    @Test
+    void rowsOfAChildTableOfProductAreNotServed() {
+        String child = SCHEMA + ".it_product_child";
+        try {
+            jdbc.execute("CREATE TABLE " + child + " () INHERITS (" + SCHEMA + ".product)");
+            jdbc.update("INSERT INTO " + child + " (product_id, product_type, segment, name, currency, monthly_fee_amount,"
+                + " monthly_fee_currency, annual_rate_percent, status, effective_from)"
+                + " VALUES ('IT-CHILD', 'PCA', 'SME', 'Child', 'AED', 0.00, 'AED', 0.00, 'ACTIVE', '2026-01-01T00:00:00Z')");
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM " + SCHEMA + ".product_history WHERE product_id = 'IT-CHILD'",
+                Integer.class)).as("the child's row bypassed the history triggers").isZero();
+
+            ProductCatalogPort storage = ((SnapshotProductCatalog) catalogPort).delegate();
+            assertThat(storage.findOfferable(new com.enterprise.openfinance.openproducts.domain.query.ListProductsQuery("PCA", "SME"),
+                    java.time.Instant.parse("2026-06-01T00:00:00Z")))
+                .extracting(e -> e.offer().productId())
+                .containsExactly("SAMPLE-SME-PCA-01");
+        } finally {
+            jdbc.execute("DROP TABLE IF EXISTS " + child);
+            // Clears relhassubclass, which stays set after the child is dropped until ANALYZE.
+            jdbc.execute("ANALYZE " + SCHEMA + ".product");
+        }
+    }
+
+    /** Installs the history guard from db/bootstrap, arms it, runs the body and always disarms. */
+    private void withArmedGuard(Runnable body) {
+        HistoryGuardBootstrap.install(jdbc, SCHEMA);
+        assertThat(jdbc.queryForObject("SELECT fbx_history_guard.arm('OpenProductsPostgresIT')", String.class))
+            .isEqualTo("armed, intact");
+        try {
+            body.run();
+        } finally {
+            jdbc.queryForObject("SELECT fbx_history_guard.disarm('OpenProductsPostgresIT')", String.class);
+        }
+    }
+
+    /** Runs the DDL in a rolled-back transaction and returns the error message, or fails if it was allowed. */
+    private String guardRefuses(String ddl) {
+        String[] message = new String[1];
+        inRolledBackTransaction(statement -> {
+            try {
+                statement.execute(ddl);
+            } catch (java.sql.SQLException refused) {
+                message[0] = refused.getMessage();
+                return;
+            }
+            org.assertj.core.api.Assertions.fail("the guard allowed: " + ddl);
+        });
+        return message[0];
+    }
+
     /** Runs the body on one connection in a transaction that is always rolled back. */
     private void inRolledBackTransaction(SqlBody body) {
         jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
