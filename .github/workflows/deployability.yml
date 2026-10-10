@@ -470,7 +470,9 @@ jobs:
           must_fail 'config.KAFKA_SECURITY_PROTOCOL is set but kafka.runtime is empty' --set config.KAFKA_SECURITY_PROTOCOL=SSL
           must_fail 'config.X_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM must be https' --set-string config.X_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM=
           # Must pass: quoted values with a newline stay one value; no key or container field is added.
-          helm template ci "$chart" $base > "$work/baseline.yaml"
+          # NetworkPolicy is opt-in: both renders enable it so its fields are compared too.
+          printf 'networkPolicy:\n  enabled: true\n  databaseCidrs: [10.0.32.0/20]\n' > "$work/np.yaml"
+          helm template ci "$chart" $base -f "$work/np.yaml" > "$work/baseline.yaml"
           cat > "$work/hostile.yaml" <<'VALUES'
           image:
             tag: "x\"\n          args: [\"--spring.config.import=file:/tmp/x.yml\"]"
@@ -478,13 +480,41 @@ jobs:
             OPEN_PRODUCTS_SEED_ENABLED: "aud\nSPRING_CONFIG_IMPORT: file:/tmp/x.yml"
           databaseCaBundle:
             configMapName: "rds-ca-bundle\n  optional: true"
+          namespace: "open-finance\n  annotations: {x: y}"
+          serviceAccount:
+            name: "open-products-catalog-service\n  annotations: {x: y}"
+            roleArn: "arn:aws:iam::123456789012:role/x\n  x: y"
+          service:
+            port: "8080\n  nodePort: 30000"
+            managementPort: "8081\n  appProtocol: x"
+          autoscaling:
+            minReplicas: "2\n  x: y"
+            maxReplicas: "8\n  x: y"
+            targetCPUUtilizationPercentage: "65\n  x: y"
+          podDisruptionBudget:
+            minAvailable: "1\n  maxUnavailable: 1"
+          # databaseCidrs are validated as canonical private CIDRs, so a hostile entry never renders.
+          networkPolicy:
+            gatewayNamespace: "istio-ingress\n          x: y"
+            observabilityNamespace: "observability\n          x: y"
+            databasePort: "5432\n          x: y"
+            otlpPort: "4318\n          x: y"
           VALUES
           # --set outranks -f, so the hostile render takes image.tag from the file only.
-          helm template ci "$chart" ${base/--set image.tag=x/} -f "$work/hostile.yaml" > "$work/hostile-out.yaml"
+          helm template ci "$chart" ${base/--set image.tag=x/} -f "$work/np.yaml" -f "$work/hostile.yaml" > "$work/hostile-out.yaml"
           python3 - "$work/baseline.yaml" "$work/hostile-out.yaml" <<'PY'
           import sys, yaml
+          HOSTILE_NAMESPACE = "open-finance\n  annotations: {x: y}"
+          HOSTILE_SA = "open-products-catalog-service\n  annotations: {x: y}"
+          HOSTILE_ROLE = "arn:aws:iam::123456789012:role/x\n  x: y"
           def load(p):
-              return {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(open(p)) if d}
+              # Keyed by kind and position: the hostile ServiceAccount name differs from the baseline's.
+              docs, seen = {}, {}
+              for d in yaml.safe_load_all(open(p)):
+                  if d:
+                      n = seen[d["kind"]] = seen.get(d["kind"], -1) + 1
+                      docs[(d["kind"], n)] = d
+              return docs
           base, bad = load(sys.argv[1]), load(sys.argv[2])
           assert base.keys() == bad.keys(), "a hostile value added or removed a document"
           for key, d in base.items():
@@ -503,6 +533,34 @@ jobs:
           cm0 = next(d for (k, _), d in base.items() if k == "ConfigMap")
           assert cm["data"].keys() == cm0["data"].keys(), "ConfigMap keys changed"
           assert cm["data"]["OPEN_PRODUCTS_SEED_ENABLED"] == "aud\nSPRING_CONFIG_IMPORT: file:/tmp/x.yml", "config value not kept as one value"
+          # Item 2 (round 7): every values interpolation of the ServiceAccount, Service, HPA, PDB and
+          # NetworkPolicy templates is quoted (numbers through int), so a hostile value adds no field.
+          def shape(x):
+              if isinstance(x, dict):
+                  return {k: shape(v) for k, v in x.items()}
+              if isinstance(x, list):
+                  return [shape(v) for v in x]
+              return None
+          for kind in ("Service", "HorizontalPodAutoscaler", "PodDisruptionBudget", "NetworkPolicy"):
+              keys = [k for k in base if k[0] == kind]
+              assert keys, f"no {kind} rendered"
+              for key in keys:
+                  assert shape(base[key]) == shape(bad[key]), f"{key}: a hostile value added or removed a field"
+                  if "namespace" in base[key]["metadata"]:
+                      assert bad[key]["metadata"]["namespace"] == HOSTILE_NAMESPACE, f"{key}: namespace not kept as one value"
+          sas = [k for k in base if k[0] == "ServiceAccount"]
+          assert sas, "no ServiceAccount rendered"
+          for key in sas:
+              sa, sa0 = bad[key], base[key]
+              assert sa.keys() == {"apiVersion", "kind", "metadata", "automountServiceAccountToken"}, f"{key}: fields {sorted(sa)}"
+              assert sa["metadata"].keys() == set(sa0["metadata"]) | {"annotations"}, f"{key}: metadata {sorted(sa['metadata'])}"
+              assert sa["metadata"].keys() <= {"name", "namespace", "labels", "annotations"}, f"{key}: metadata {sorted(sa['metadata'])}"
+              assert sa["metadata"]["labels"].keys() == sa0["metadata"]["labels"].keys(), f"{key}: labels changed"
+              assert sa["metadata"]["annotations"] == {"eks.amazonaws.com/role-arn": HOSTILE_ROLE}, f"{key}: annotations {sa['metadata']['annotations']}"
+              assert sa["metadata"]["name"] == HOSTILE_SA, f"{key}: name not kept as one value"
+              if "namespace" in sa0["metadata"]:
+                  assert sa["metadata"]["namespace"] == HOSTILE_NAMESPACE, f"{key}: namespace not kept as one value"
+          print("ServiceAccount, Service, HPA, PDB and NetworkPolicy: hostile values add no key or field")
           print("hostile values stay single quoted values: no added keys, env entries or container fields")
           PY
           rm -rf "$work" guard.err

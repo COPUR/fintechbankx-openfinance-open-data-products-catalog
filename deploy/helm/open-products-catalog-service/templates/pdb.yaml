@@ -2,11 +2,13 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: {{ include "products.name" . }}
-  namespace: {{ include "products.namespace" . }}
+  namespace: {{ include "products.namespace" . | quote }}
   labels:
     {{- include "products.labels" . | nindent 4 }}
 spec:
-  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- $minAvailable := .Values.podDisruptionBudget.minAvailable }}
+  {{- /* An int or a percentage string ("50%"); a string is quoted so it stays one value. */}}
+  minAvailable: {{ if kindIs "string" $minAvailable }}{{ $minAvailable | quote }}{{ else }}{{ $minAvailable | int }}{{ end }}
   selector:
     matchLabels:
       {{- include "products.selectorLabels" . | nindent 6 }}

@@ -36,7 +36,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ include "products.name" . }}
-  namespace: {{ include "products.namespace" . }}
+  namespace: {{ include "products.namespace" . | quote }}
   labels:
     {{- include "products.labels" . | nindent 4 }}
 spec:
@@ -51,18 +51,18 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.networkPolicy.gatewayNamespace }}
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.gatewayNamespace | quote }}
       ports:
         - protocol: TCP
-          port: {{ .Values.service.port }}
+          port: {{ .Values.service.port | int }}
     # Prometheus scrapes the management port.
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.networkPolicy.observabilityNamespace }}
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.observabilityNamespace | quote }}
       ports:
         - protocol: TCP
-          port: {{ .Values.service.managementPort }}
+          port: {{ .Values.service.managementPort | int }}
     {{- if .Values.mesh.sidecarInject }}
     # Istio sidecar: kubelet probes are rewritten to the agent on 15020 and
     # sidecar readiness is on 15021. Probes come from the node, which no
@@ -87,20 +87,20 @@ spec:
     # Aurora PostgreSQL, only to the cluster's subnets
     - ports:
         - protocol: TCP
-          port: {{ .Values.networkPolicy.databasePort }}
+          port: {{ .Values.networkPolicy.databasePort | int }}
       to:
         {{- range .Values.networkPolicy.databaseCidrs }}
         - ipBlock:
-            cidr: {{ . }}
+            cidr: {{ . | quote }}
         {{- end }}
     # OTLP traces to the platform collector
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.networkPolicy.observabilityNamespace }}
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.observabilityNamespace | quote }}
       ports:
         - protocol: TCP
-          port: {{ .Values.networkPolicy.otlpPort }}
+          port: {{ .Values.networkPolicy.otlpPort | int }}
     # Istio sidecar control plane (xDS, certificates)
     - to:
         - namespaceSelector:
