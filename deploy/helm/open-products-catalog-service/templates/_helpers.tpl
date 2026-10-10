@@ -6,9 +6,16 @@
 {{- .Values.namespace | default .Release.Namespace -}}
 {{- end -}}
 
+{{/*
+Selector labels of the serving pods (cicd-templates 335a345). component=service
+keeps the Service, PDB, NetworkPolicy, topology spread and the Deployment
+selector on the serving pods only. The Deployment selector is immutable: a
+release installed without it must be deleted and installed again.
+*/}}
 {{- define "products.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "products.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: service
 {{- end -}}
 
 {{- define "products.labels" -}}
