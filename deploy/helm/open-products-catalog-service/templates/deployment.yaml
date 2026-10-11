@@ -74,7 +74,7 @@ spec:
         # Flyway as the schema owner, then exit (OPEN_PRODUCTS_MIGRATE_ONLY).
         # Replicas starting together are serialised by Flyway's lock.
         - name: migrate
-          image: {{ printf "%s:%s" (required "image.repository is required" .Values.image.repository) (required "image.tag is required" .Values.image.tag) | quote }}
+          image: {{ include "products.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           envFrom:
             - configMapRef:
@@ -116,7 +116,7 @@ spec:
       {{- end }}
       containers:
         - name: open-products-catalog-service
-          image: {{ printf "%s:%s" (required "image.repository is required" .Values.image.repository) (required "image.tag is required" .Values.image.tag) | quote }}
+          image: {{ include "products.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           ports:
             - name: http

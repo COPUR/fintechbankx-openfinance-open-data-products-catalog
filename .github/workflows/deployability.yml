@@ -30,11 +30,22 @@ jobs:
   helm:
     name: deploy/helm
     runs-on: ubuntu-latest
+    # bash -eo pipefail for every run step: a failing command inside a pipe fails the step.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.3
+      # The manifest assertions parse rendered YAML with PyYAML: pinned here rather than relying on
+      # what the runner image happens to ship.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML for the manifest assertions
+        run: python -m pip install pyyaml==6.0.2
       - name: Vendored platform guard (whole-file sha256 pinned, no fbx.* redefinition, called first by every workload template)
         run: |
           # fintechbankx-platform-delivery-iac-cicd-templates
@@ -50,6 +61,25 @@ jobs:
           helm lint "$chart" $args
           helm template ci "$chart" $args > rendered.yaml
           helm template ci "$chart" -f "$chart/values-dev.yaml" $args > /dev/null
+      - name: Chart refuses a mutable image tag (latest) and an empty one
+        run: |
+          # image.tag is the immutable tag the pipeline built (the git SHA), never "latest" in any case: a mutable
+          # tag lets a restarted pod run another build than the one released. The chart has no default tag
+          # (an empty one fails as required) and takes no digest. Each case keeps the chart's message.
+          chart=deploy/helm/open-products-catalog-service
+          base="--set image.repository=ci/x --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=ci/open-products-catalog-service/db-migration --set config.DB_URL=jdbc:postgresql://ci:5432/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
+          must_fail() {  # <expected text> <helm args...>
+            local expect="$1" out; shift
+            if out="$(helm template ci "$chart" $base "$@" 2>&1)"; then echo "chart rendered with: $*"; exit 1; fi
+            grep -qF -- "$expect" <<< "$out" || { echo "render failed for another reason than '$expect' with: $*: $out"; exit 1; }
+            echo "refused as expected: $*"
+          }
+          for tag in latest Latest LATEST; do
+            must_fail "image.tag \"$tag\" is refused" --set "image.tag=$tag"
+          done
+          must_fail 'image.tag is required' --set image.tag=
+          # The immutable tag still renders.
+          helm template ci "$chart" $base --set image.tag=${{ github.sha }} > /dev/null
       - name: Rendering fails without database CIDRs
         run: |
           chart=deploy/helm/open-products-catalog-service
@@ -849,6 +879,12 @@ jobs:
             echo "ConfigMap renders OIDC_* or empty values"
             exit 1
           fi
+      - name: Every upstream guard case of a4f0072..6b6c317 that applies to this chart's adapter
+        run: |
+          # The full upstream set (helm-unittest suites and validate-chart.sh must_fail cases added with the
+          # vendored guard), mapped to this chart's routes; scripts/ci/guard-upstream-cases.sh says how.
+          bash scripts/ci/guard-upstream-cases.sh deploy/helm/open-products-catalog-service --database-ca --no-kafka-runtime -- \
+            --set image.repository=ci/x --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=ci/open-products-catalog-service/db-migration --set "config.DB_URL=jdbc:postgresql://ci:5432/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
 
   terraform:
     name: deploy/terraform

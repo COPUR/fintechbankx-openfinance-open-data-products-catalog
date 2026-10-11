@@ -1,0 +1,5 @@
+# Vendored platform guard (cicd-templates 6b6c317, header-less, whole-file sha256 pinned): the copy, the
+# script that verifies it, and the file that pins its digest need a platform owner's review.
+/deploy/helm/*/templates/_fbx_helpers.tpl @COPUR
+/scripts/ci/verify-vendored-guard.sh @COPUR
+/.github/workflows/deployability.yml @COPUR

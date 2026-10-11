@@ -82,7 +82,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: history-guard-check
-      image: {{ printf "%s:%s" (required "image.repository is required" .Values.image.repository) (required "image.tag is required" .Values.image.tag) | quote }}
+      image: {{ include "products.image" . | quote }}
       imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
       envFrom:
         - configMapRef:
@@ -215,4 +215,19 @@ value of this chart that feeds one of the guard's routes; a key left out is neve
       "kafka" (dict "runtime" "")
       "externalSecret" (dict "enabled" true "data" ($secrets.data | default list)
         "dataFrom" (concat ($secrets.dataFrom | default list) (.Values.externalSecret.dataFrom | default list))))) -}}
+{{- end -}}
+
+{{/*
+The image reference "<image.repository>:<image.tag>". image.tag is the immutable tag the pipeline
+built (the git SHA): it has no default (empty fails as required), and "latest" in any case is refused,
+since a mutable tag lets a restarted pod run another build than the one released. The chart takes no
+digest.
+*/}}
+{{- define "products.image" -}}
+{{- $repository := required "image.repository is required" .Values.image.repository -}}
+{{- $tag := toString (required "image.tag is required" .Values.image.tag) -}}
+{{- if eq (lower (trim $tag)) "latest" -}}
+{{- fail (printf "image.tag %q is refused: use the immutable tag the pipeline built (the git SHA); a mutable tag lets a restarted pod run another build than the one released" $tag) -}}
+{{- end -}}
+{{- printf "%s:%s" $repository $tag -}}
 {{- end -}}
