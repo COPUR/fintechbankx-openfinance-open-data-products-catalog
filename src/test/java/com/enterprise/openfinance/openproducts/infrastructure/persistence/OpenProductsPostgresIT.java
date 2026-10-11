@@ -140,9 +140,14 @@ class OpenProductsPostgresIT {
             + " WHERE product_id = 'IT-ARN' ORDER BY history_id DESC LIMIT 1", String.class)).isEqualTo(arn);
     }
 
-    /** Only the history trigger writes the history; deleting a product is recorded too. */
+    /**
+     * Only the history trigger writes the history; deleting a product is recorded too.
+     * The history is append-only, so rows from earlier runs on a persistent test
+     * database stay: the assertion reads only rows written after this run's start.
+     */
     @Test
     void historyCannotBeForgedAndDeletesAreRecorded() {
+        long before = jdbc.queryForObject("SELECT coalesce(max(history_id), 0) FROM " + SCHEMA + ".product_history", Long.class);
         assertThatThrownBy(() -> jdbc.update("INSERT INTO " + SCHEMA + ".product_history (product_id, operation, new_row,"
                 + " changed_by, login_role, application_name, transaction_id, changed_at)"
                 + " VALUES ('IT-FORGED', 'INSERT', '{}', 'x', 'x', 'x', 0, now())"))
@@ -153,7 +158,7 @@ class OpenProductsPostgresIT {
 
         assertThat(jdbc.queryForList("SELECT operation || ':' || coalesce(old_row->>'product_id', '-') || ':'"
                 + " || coalesce(new_row->>'product_id', '-') FROM " + SCHEMA + ".product_history"
-                + " WHERE product_id = 'IT-DEL' ORDER BY history_id", String.class))
+                + " WHERE product_id = 'IT-DEL' AND history_id > ? ORDER BY history_id", String.class, before))
             .containsExactly("INSERT:-:IT-DEL", "DELETE:IT-DEL:-");
     }
 
