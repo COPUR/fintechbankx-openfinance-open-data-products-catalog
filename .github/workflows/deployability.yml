@@ -35,28 +35,13 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.3
-      - name: Vendored platform guard is unchanged (header sha256) and included once in the workload template
+      - name: Vendored platform guard (whole-file sha256 pinned, no fbx.* redefinition, called first by every workload template)
         run: |
-          chart=deploy/helm/open-products-catalog-service
-          file="$chart/templates/_fbx_helpers.tpl"
-          # The header names source, commit, path and sha256; the sha256 covers everything after the
-          # first line that is exactly '*/}}' (the unchanged platform file).
-          want="$(sed -n 's/^sha256: *\([0-9a-f]\{64\}\)$/\1/p' "$file" | head -n 1)"
-          test -n "$want" || { echo "$file: no sha256 line in the header"; exit 1; }
-          grep -qx 'commit: a4f0072' "$file" || { echo "$file: header must name commit a4f0072"; exit 1; }
-          got="$(awk 'f {print} !f && $0 == "*/}}" {f=1}' "$file" | sha256sum | cut -d ' ' -f 1)"
-          if [ "$got" != "$want" ]; then
-            echo "$file: body sha256 $got, header records $want: re-copy the platform file unchanged"; exit 1
-          fi
-          # fbx.guard is included exactly once, in the workload template, before its first apiVersion:.
-          workload="$chart/templates/deployment.yaml"
-          n="$(grep -l 'include "fbx.guard"' "$chart"/templates/* | grep -cv '_fbx_helpers.tpl$' || true)"
-          [ "$n" = 1 ] || { echo "include \"fbx.guard\" must be in exactly one template (found $n)"; exit 1; }
-          [ "$(grep -c 'include "fbx.guard"' "$workload")" = 1 ] || { echo "$workload must include fbx.guard exactly once"; exit 1; }
-          guard="$(grep -n 'include "fbx.guard"' "$workload" | cut -d: -f1)"
-          api="$(grep -n '^apiVersion:' "$workload" | head -n 1 | cut -d: -f1)"
-          [ "$guard" -lt "$api" ] || { echo "$workload: fbx.guard must be included before the first apiVersion: (line $guard, apiVersion line $api)"; exit 1; }
-          echo "$file body sha256 $got; fbx.guard included once, line $guard of $workload"
+          # fintechbankx-platform-delivery-iac-cicd-templates
+          # charts/fintechbankx-service/templates/_helpers.tpl at 6b6c3170decb478a3af5c6c80422e0cbea1b1bb0 (6b6c317),
+          # vendored whole and unchanged, without a header, as templates/_fbx_helpers.tpl;
+          # scripts/ci/verify-vendored-guard.sh copied unchanged from the same repository and commit (needs node 18+).
+          bash scripts/ci/verify-vendored-guard.sh deploy/helm/open-products-catalog-service 8ba2e4a11ead019c25bf0a01e4fe4bbabb6fef0e1980e5fa828ccb9f5673f8ba
       - name: Lint and render chart
         run: |
           chart=deploy/helm/open-products-catalog-service
@@ -429,7 +414,7 @@ jobs:
           fi
       - name: Vendored guard refuses on every adapter route, and interpolated keys and values stay in place
         run: |
-          # README "Vendoring the guard" steps 2-4 (cicd-templates a4f0072): the adapter in
+          # README "Vendoring the guard" steps 2-4 (cicd-templates a4f0072, guard re-vendored at 6b6c317): the adapter in
           # deployment.yaml maps config, extraEnv (list or map form), envFrom, extraEnvFrom,
           # databaseCa, kafka.runtime and the rendered ExternalSecrets (no env value of the templates is
           # interpolated from values: all literals or secretKeyRefs); each
@@ -478,8 +463,8 @@ jobs:
             tag: "x\"\n          args: [\"--spring.config.import=file:/tmp/x.yml\"]"
           config:
             OPEN_PRODUCTS_SEED_ENABLED: "aud\nSPRING_CONFIG_IMPORT: file:/tmp/x.yml"
-          databaseCaBundle:
-            configMapName: "rds-ca-bundle\n  optional: true"
+          # databaseCaBundle.configMapName is pinned to rds-ca-bundle by the guard since 6b6c317: its
+          # hostile form is a must_fail case of the next step.
           namespace: "open-finance\n  annotations: {x: y}"
           serviceAccount:
             name: "open-products-catalog-service\n  annotations: {x: y}"
@@ -564,6 +549,102 @@ jobs:
           print("hostile values stay single quoted values: no added keys, env entries or container fields")
           PY
           rm -rf "$work" guard.err
+          exit $failed
+      - name: Platform guard 6b6c317 refuses database CA, Kafka client TLS, Secret-only, DocumentDB and property-reading names
+        run: |
+          # Platform guard 6b6c317 (README "Vendoring the guard", step 4): the database CA mount pinned
+          # to /etc/fintechbankx/rds-ca, global-bundle.pem and ConfigMap rds-ca-bundle; Kafka client TLS
+          # names; Secret-only names (KAFKA_TLS_*, MONGODB_URI); DocumentDB names; kafka and mongodb in
+          # JVM options; the property reading of names with '_' inside an element; DB_SSL_ROOT_CERT and
+          # '${' in a JDBC URL. Each case keeps the guard's message (fixed string), so it cannot pass
+          # because the render failed for another reason. Adapted to this chart: extraEnv is refused whole
+          # by the chart, so extraEnv cases only prove the guard's message comes first; the chart sets no
+          # externalSecret.data from values (refused), so the ExternalSecret route is the chart's own entries.
+          chart=deploy/helm/open-products-catalog-service
+          good='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
+          base="--set image.repository=ci/x --set image.tag=x --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=$good"
+          failed=0
+          must_fail() {  # <expected text in the error> <helm args...>
+            local expect="$1"; shift
+            if helm template ci "$chart" $base "$@" > /dev/null 2> guard6.err; then
+              echo "chart rendered with: $*"; failed=1
+            elif ! grep -qF -- "$expect" guard6.err; then
+              echo "render failed for another reason than '$expect' with: $*"; cat guard6.err; failed=1
+            fi
+          }
+          work="$(mktemp -d)"
+          n=0
+          config_fails() {  # <expected text> <config key> [value]; a values file keeps dots and brackets in one key
+            n=$((n + 1)); printf 'config:\n  "%s": "%s"\n' "$2" "${3-x}" > "$work/c$n.yaml"
+            must_fail "$1" -f "$work/c$n.yaml"
+          }
+          env_fails() {  # <expected text> <one extraEnv entry as a YAML flow mapping>
+            n=$((n + 1)); printf 'extraEnv:\n  - %s\n' "$2" > "$work/e$n.yaml"
+            must_fail "$1" -f "$work/e$n.yaml"
+          }
+          # Database CA mount (fbx.validateDatabaseCa): pinned; Helm deletes a key set to null, which is refused as missing.
+          must_fail 'databaseCa.mountPath must be /etc/fintechbankx/rds-ca (got "/app/config")' --set databaseCaBundle.mountPath=/app/config
+          must_fail 'databaseCa.mountPath must be /etc/fintechbankx/rds-ca (got "")' --set databaseCaBundle.mountPath=null
+          must_fail 'databaseCa.key must be global-bundle.pem (got "application.yml")' --set databaseCaBundle.key=application.yml
+          must_fail 'databaseCa.key must be global-bundle.pem (got "")' --set databaseCaBundle.key=null
+          must_fail 'databaseCa.configMapName must be rds-ca-bundle (got "other-ca")' --set databaseCaBundle.configMapName=other-ca
+          printf 'databaseCaBundle:\n  configMapName: "rds-ca-bundle\\n  optional: true"\n' > "$work/ca-newline.yaml"
+          must_fail 'databaseCa.configMapName must be rds-ca-bundle (got' -f "$work/ca-newline.yaml"
+          must_fail 'databaseCa.configMapName is required while databaseCa.enabled' --set databaseCaBundle.configMapName=null
+          # DB_SSL_ROOT_CERT and other TLS parameter names, and '${' in a JDBC URL.
+          for key in DB_SSL_ROOT_CERT PGSSLROOTCERT OPF_DB_SSL_MODE; do
+            config_fails 'a TLS parameter name can replace the mounted CA' "$key" ''
+          done
+          env_fails 'a TLS parameter name can replace the mounted CA' '{name: DB_SSL_ROOT_CERT, value: ""}'
+          must_fail "config.DB_URL must not contain '\${' or '\$('" --set-string "config.DB_URL=$good&ApplicationName=\${X}" --set 'databaseUrlAllowedParams={ApplicationName}'
+          # Kafka client TLS names: refused on every route whatever kafka.runtime is.
+          for key in SPRING_KAFKA_SSL_TRUST_STORE_LOCATION SPRING_KAFKA_SSL_TRUSTSTORELOCATION SPRING_KAFKA_SSL_TRUSTSTORE_LOCATION \
+                     spring.kafka.ssl.trust-store-location spring.kafka.s-sl.trust-store-location spring.kafka.s_sl.trust-store-location \
+                     SPRING_KAFKA_PROPERTIES_SSL_TRUSTSTORE_LOCATION spring.kafka.properties.ssl.keystore.type \
+                     'spring.kafka.properties[ssl.truststore.location]' SPRING_KAFKA_PRODUCER_SSL_KEY_STORE_LOCATION \
+                     spring.kafka.consumer.properties.ssl.truststore.certificates spring.kafka.streams.ssl.protocol; do
+            config_fails 'is not allowed: a Kafka client TLS setting' "$key"
+          done
+          env_fails 'must not set SPRING_KAFKA_SSL_KEY_STORE_LOCATION (value or valueFrom): a Kafka client TLS setting' '{name: SPRING_KAFKA_SSL_KEY_STORE_LOCATION, value: /tmp/k.p12}'
+          # KAFKA_TLS_CERT, KAFKA_TLS_KEY, KAFKA_TLS_CA and MONGODB_URI: only from a Secret, only in these spellings.
+          for key in KAFKA_TLS_CERT KAFKA_TLS_KEY KAFKA_TLS_CA MONGODB_URI kafka.tls.ca Kafka_Tls_Ca mongodb.uri mongodb_uri; do
+            config_fails "config.$key is not allowed" "$key"
+          done
+          env_fails 'extraEnv KAFKA_TLS_CA must come from valueFrom.secretKeyRef alone' '{name: KAFKA_TLS_CA, value: x}'
+          env_fails 'extraEnv KAFKA_TLS_CERT must come from valueFrom.secretKeyRef alone' '{name: KAFKA_TLS_CERT, valueFrom: {configMapKeyRef: {name: c, key: k}}}'
+          env_fails 'extraEnv KAFKA_TLS_KEY must come from valueFrom.secretKeyRef alone' '{name: KAFKA_TLS_KEY, value: "", valueFrom: {secretKeyRef: {name: s, key: k}}}'
+          env_fails 'extraEnv MONGODB_URI must come from valueFrom.secretKeyRef alone' '{name: MONGODB_URI, value: "mongodb://x/?tls=false"}'
+          env_fails 'extraEnv MONGODB_URI must come from valueFrom.secretKeyRef alone' '{name: MONGODB_URI, valueFrom: {fieldRef: {fieldPath: metadata.name}}}'
+          env_fails 'extraEnv Kafka_Tls_Ca is not allowed' '{name: Kafka_Tls_Ca, valueFrom: {secretKeyRef: {name: s, key: k}}}'
+          env_fails 'extraEnv mongodb.uri is not allowed' '{name: mongodb.uri, valueFrom: {secretKeyRef: {name: s, key: k}}}'
+          # No Kafka client here (kafka.runtime ""): no chart-rendered KAFKA_TLS_* to accept.
+          # DocumentDB: spring.data.mongodb.* in every spelling, credentials aside.
+          for key in SPRING_DATA_MONGODB_URI spring.data.mongodb.uri spring.data.mongo-db.uri spring.data.mongo_db.uri \
+                     'spring.data[mongodb].uri' SPRING_DATA_MONGODB_HOST spring.data.mongodb.ssl.enabled \
+                     spring.data.mongodb.replica-set-name spring.data.mongodb.password; do
+            config_fails 'is not allowed: a spring.data.mongodb.* property' "$key"
+          done
+          config_fails 'is not allowed: an SSL bundle property' spring.data.mongodb.ssl.bundle
+          env_fails 'must not set SPRING_DATA_MONGODB_URI (value or valueFrom): a spring.data.mongodb.* property' '{name: SPRING_DATA_MONGODB_URI, valueFrom: {secretKeyRef: {name: s, key: k}}}'
+          helm template ci "$chart" $base --set config.SPRING_DATA_MONGODB_USERNAME=ci > /dev/null \
+            || { echo "config.SPRING_DATA_MONGODB_USERNAME must render (a credential name the guard allows)"; failed=1; }
+          # JVM options: kafka and mongodb (system properties win over the environment and the Secret).
+          for value in '-Dspring.kafka.ssl.trust-store-location=/tmp/t.p12' '-DKAFKA_TLS_CA=x' '-Dspring.data.mongodb.uri=mongodb://x' \
+                       '-DMONGODB_URI=mongodb://x' '-Dspring.data.mongo_db.host=x'; do
+            for name in JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS; do
+              config_fails "config.$name must not mention" "$name" "$value"
+            done
+          done
+          # Property reading: '_' inside an element is ignored, so these bind the plain name.
+          config_fails 'a profile can activate' spring.pro_files.active local
+          config_fails 'a spring.config.* property' spring.con_fig.import optional:file:/tmp/x.yml
+          config_fails 'it can redirect or override the datasource' spring.applica_tion.json '{}'
+          config_fails "it can switch off the service's startup TLS assertion" fintech_bankx.tls.enforce false
+          config_fails 'it can redirect or override the datasource' spring.data_source.url x
+          config_fails 'a Kafka client TLS setting' spring.kafka.s_sl.trust-store-type PKCS12
+          config_fails 'a spring.data.mongodb.* property' spring.data.mongo_db.host x
+          config_fails 'an SSL bundle property' spring.s_sl.bundle.pem.x.truststore.certificate x
+          rm -rf "$work" guard6.err
           exit $failed
       - name: No rendered container or ConfigMap carries the startup TLS switch (on by default)
         run: |

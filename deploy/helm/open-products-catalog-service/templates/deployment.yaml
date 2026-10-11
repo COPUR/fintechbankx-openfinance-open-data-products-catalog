@@ -1,57 +1,5 @@
-{{- /*
-Platform datasource/TLS guard, vendored unchanged as _fbx_helpers.tpl (source, commit, path and sha256 in
-its header; platform chart README, "Vendoring the guard"). The adapter maps every
-value of this chart that feeds one of the guard's routes; a key left out is never checked:
-- config: .Values.config (ConfigMap, envFrom of the migrate init container, the service and
-  the history guard check pods).
-- extraEnv: .Values.extraEnv as a list ({name, value} entries; the map form is converted),
-  refused whole by configmap.yaml since the chart renders none. No env value of the
-  templates is interpolated from values (all literals or secretKeyRefs), so there is nothing
-  else to pass. SPRING_PROFILES_ACTIVE (aws) is a chart-rendered literal and is not
-  passed: the guard refuses every spring.profiles.* name it is given. The startup TLS
-  assertion needs no chart-rendered switch: it is on by default (fintechbankx.tls.enforce,
-  which the guard refuses).
-- envFrom, extraEnvFrom: no such values; mapped so that a value set there (which no template
-  renders) is refused rather than ignored.
-- javaToolOptions: the chart has no such value and renders none; a value set there is refused
-  below. JVM options can only come from config.*, where the guard checks JAVA_TOOL_OPTIONS,
-  JDK_JAVA_OPTIONS and _JAVA_OPTIONS.
-- externalSecret.data / extraData as values: the chart renders its own entries only; a value
-  set there is refused below rather than ignored.
-- databaseCa: databaseCaBundle, always mounted (enabled), so DB_URL must carry
-  sslrootcert=<mountPath>/<key>.
-- kafka.runtime: "" (the service has no Kafka client; a Kafka protocol key in config then
-  fails the render).
-- externalSecret: data = the entries externalsecret.yaml renders (db and db-migration),
-  dataFrom = any dataFrom it renders plus .Values.externalSecret.dataFrom (refused).
-*/ -}}
-{{- $extraEnv := list -}}
-{{- if kindIs "map" .Values.extraEnv -}}
-{{- range $name, $value := .Values.extraEnv -}}
-{{- $extraEnv = append $extraEnv (dict "name" $name "value" (toString $value)) -}}
-{{- end -}}
-{{- else -}}
-{{- $extraEnv = .Values.extraEnv | default list -}}
-{{- end -}}
-{{- $secrets := fromYaml (include "products.renderedSecretData" (dict "root" . "template" "externalsecret.yaml")) -}}
-{{- if .Values.javaToolOptions -}}
-{{- fail "javaToolOptions is not supported by this chart (it renders no JAVA_TOOL_OPTIONS of its own); set config.JAVA_TOOL_OPTIONS, which the guard checks" -}}
-{{- end -}}
-{{- range $k := list "data" "extraData" -}}
-{{- if index ($.Values.externalSecret | default dict) $k -}}
-{{- fail (printf "externalSecret.%s is not supported by this chart: it renders its own ExternalSecret entries (templates/externalsecret.yaml), which the guard checks" $k) -}}
-{{- end -}}
-{{- end -}}
-{{- include "fbx.guard" (dict "Values" (dict
-      "config" .Values.config
-      "extraEnv" $extraEnv
-      "envFrom" .Values.envFrom
-      "extraEnvFrom" .Values.extraEnvFrom
-      "javaToolOptions" ""
-      "databaseCa" (dict "enabled" true "mountPath" .Values.databaseCaBundle.mountPath "key" .Values.databaseCaBundle.key)
-      "kafka" (dict "runtime" "")
-      "externalSecret" (dict "enabled" true "data" ($secrets.data | default list)
-        "dataFrom" (concat ($secrets.dataFrom | default list) (.Values.externalSecret.dataFrom | default list))))) -}}
+{{- /* Platform guard first (products.guard in _helpers.tpl; README "Vendoring the guard", step 2). */ -}}
+{{- include "products.guard" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

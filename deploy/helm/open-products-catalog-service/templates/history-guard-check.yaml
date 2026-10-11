@@ -1,4 +1,6 @@
 {{- if .Values.externalSecret.enabled }}
+{{- /* Platform guard first (products.guard in _helpers.tpl; README "Vendoring the guard", step 2). */ -}}
+{{- include "products.guard" . }}
 {{- with .Values.historyGuardCheck.breakGlassTicket }}
 {{- if not (regexMatch "^[A-Za-z][A-Za-z0-9]*-[0-9]+$" .) }}
 {{- fail (printf "historyGuardCheck.breakGlassTicket %q must be a change ticket id such as CHG-1234" .) }}
