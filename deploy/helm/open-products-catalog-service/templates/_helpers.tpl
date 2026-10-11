@@ -2,8 +2,18 @@
 {{- .Chart.Name -}}
 {{- end -}}
 
+{{/*
+The namespace every document is written to: .Values.namespace, else the release namespace.
+It must be an RFC 1123 DNS label, as Kubernetes requires, so a value holding a newline or a
+"---" document separator fails the render instead of closing its line and adding documents
+the guard never sees. Every template writes it quoted as well.
+*/}}
 {{- define "products.namespace" -}}
-{{- .Values.namespace | default .Release.Namespace -}}
+{{- $ns := toString (.Values.namespace | default .Release.Namespace) -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $ns) -}}
+{{- fail (printf "namespace must be an RFC 1123 DNS label (lower-case letters, digits and '-', at most 63 characters, starting and ending with a letter or digit), got %q" $ns) -}}
+{{- end -}}
+{{- $ns -}}
 {{- end -}}
 
 {{/*

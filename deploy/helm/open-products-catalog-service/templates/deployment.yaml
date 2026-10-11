@@ -4,7 +4,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "products.name" . }}
-  namespace: {{ include "products.namespace" . }}
+  namespace: {{ include "products.namespace" . | quote }}
   labels:
     {{- include "products.labels" . | nindent 4 }}
   {{- with .Values.historyGuardCheck.breakGlassTicket }}

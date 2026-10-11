@@ -385,7 +385,7 @@ jobs:
           must_refuse() {
             desc="$1"; expected="$2"; shift 2
             if out="$(helm template ci "$chart" $common "$@" 2>&1)"; then echo "$desc must be refused"; exit 1; fi
-            echo "$out" | grep -qE "$expected" || { echo "$desc failed for another reason: $out"; exit 1; }
+            grep -qE "$expected" <<< "$out" || { echo "$desc failed for another reason: $out"; exit 1; }
           }
           for name in SPRING_PROFILES_ACTIVE spring.profiles.active Spring-Profiles-Include SPRING_PROFILES_DEFAULT \
                       spring_profiles_group_aws SPRING_PROFILESACTIVE; do
@@ -465,7 +465,6 @@ jobs:
             OPEN_PRODUCTS_SEED_ENABLED: "aud\nSPRING_CONFIG_IMPORT: file:/tmp/x.yml"
           # databaseCaBundle.configMapName is pinned to rds-ca-bundle by the guard since 6b6c317: its
           # hostile form is a must_fail case of the next step.
-          namespace: "open-finance\n  annotations: {x: y}"
           serviceAccount:
             name: "open-products-catalog-service\n  annotations: {x: y}"
             roleArn: "arn:aws:iam::123456789012:role/x\n  x: y"
@@ -489,7 +488,7 @@ jobs:
           helm template ci "$chart" ${base/--set image.tag=x/} -f "$work/np.yaml" -f "$work/hostile.yaml" > "$work/hostile-out.yaml"
           python3 - "$work/baseline.yaml" "$work/hostile-out.yaml" <<'PY'
           import sys, yaml
-          HOSTILE_NAMESPACE = "open-finance\n  annotations: {x: y}"
+          HOSTILE_NAMESPACE = "open-finance"  # a hostile namespace fails the render (next step)
           HOSTILE_SA = "open-products-catalog-service\n  annotations: {x: y}"
           HOSTILE_ROLE = "arn:aws:iam::123456789012:role/x\n  x: y"
           def load(p):
@@ -550,6 +549,37 @@ jobs:
           PY
           rm -rf "$work" guard.err
           exit $failed
+      - name: Namespace is an RFC 1123 DNS label, and a valid render writes exactly the default documents
+        run: |
+          # Every template writes the namespace through products.namespace, quoted, and the helper fails the render
+          # unless it is an RFC 1123 DNS label: a "---" separator or a newline cannot close the line and add
+          # documents (a Pod) that the guard never sees.
+          chart=deploy/helm/open-products-catalog-service
+          good='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
+          args="--set image.repository=ci/x --set image.tag=x --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=$good"
+          work="$(mktemp -d)"
+          ns_fail() {  # <description> <helm args...>
+            local desc="$1"; shift
+            if out="$(helm template ci "$chart" $args "$@" 2>&1)"; then echo "$desc must be refused"; exit 1; fi
+            grep -qF 'namespace must be an RFC 1123 DNS label' <<< "$out" || { echo "$desc failed for another reason: $out"; exit 1; }
+            echo "refused as expected: $desc"
+          }
+          separator=$'open-finance\n---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: injected\nspec:\n  containers: [{name: x, image: x}]'
+          newline=$'open-finance\n  annotations: {x: y}'
+          printf 'namespace: "open-finance\\n---\\napiVersion: v1\\nkind: Pod\\nmetadata:\\n  name: injected\\nspec:\\n  containers: [{name: x, image: x}]"\n' > "$work/ns-separator.yaml"
+          printf 'namespace: "open-finance\\n  annotations: {x: y}"\n' > "$work/ns-newline.yaml"
+          ns_fail "values namespace with a --- document separator" -f "$work/ns-separator.yaml"
+          ns_fail "values namespace with a newline" -f "$work/ns-newline.yaml"
+          ns_fail "release namespace with a --- document separator" --set namespace= --namespace "$separator"
+          ns_fail "release namespace with a newline" --set namespace= --namespace "$newline"
+          # A valid render writes exactly the documents of the default values (count and kinds), so a line a
+          # later change leaves unquoted cannot add a document the guard never sees.
+          docs() { python3 -c 'import collections, sys, yaml; c = collections.Counter(str(d.get("kind")) if isinstance(d, dict) else "<not a mapping>" for d in yaml.safe_load_all(sys.stdin) if d is not None); print(" ".join(f"{k}={n}" for k, n in sorted(c.items())))'; }
+          want="ConfigMap=1 CronJob=1 Deployment=1 ExternalSecret=2 HorizontalPodAutoscaler=1 Job=1 PodDisruptionBudget=1 Service=1 ServiceAccount=1"
+          got="$(helm template ci "$chart" $args | docs)"
+          [ "$got" = "$want" ] || { echo "rendered documents differ from the default set: got [$got], want [$want]"; exit 1; }
+          echo "the default render writes exactly: $got"
+          rm -rf "$work"
       - name: Platform guard 6b6c317 refuses database CA, Kafka client TLS, Secret-only, DocumentDB and property-reading names
         run: |
           # Platform guard 6b6c317 (README "Vendoring the guard", step 4): the database CA mount pinned

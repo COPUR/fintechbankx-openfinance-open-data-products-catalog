@@ -10,7 +10,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: {{ include "products.name" . }}-history-guard-check
-  namespace: {{ include "products.namespace" . }}
+  namespace: {{ include "products.namespace" . | quote }}
   labels:
     {{- include "products.historyGuardCheckLabels" . | nindent 4 }}
 spec:
@@ -33,7 +33,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "products.name" . }}-history-guard-gate
-  namespace: {{ include "products.namespace" . }}
+  namespace: {{ include "products.namespace" . | quote }}
   labels:
     {{- include "products.historyGuardCheckLabels" . | nindent 4 }}
   annotations:
