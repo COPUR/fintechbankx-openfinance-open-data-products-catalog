@@ -12,3 +12,6 @@ build/
 **/.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
+
+# helm template output written by the deploy/helm CI job
+/rendered.yaml
