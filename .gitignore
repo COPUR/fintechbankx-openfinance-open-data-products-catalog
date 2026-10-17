@@ -15,3 +15,6 @@ build/
 
 # helm template output written by the deploy/helm CI job
 /rendered.yaml
+
+# Scratch output of local helm and gate runs
+*.err

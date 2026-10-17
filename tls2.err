@@ -1,3 +1,0 @@
-Error: execution error at (open-products-catalog-service/templates/history-guard-check.yaml:3:4): config.DB_URL must spell SSLMODE in lower case (PgJDBC ignores it otherwise)
-
-Use --debug flag to render out invalid YAML

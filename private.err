@@ -1,3 +1,0 @@
-Error: execution error at (open-products-catalog-service/templates/networkpolicy.yaml:32:4): networkPolicy.databaseCidrs entry "10.0.300.0/24" is not inside a private range (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7; no IPv4-mapped IPv6): list the Aurora subnets' CIDRs only
-
-Use --debug flag to render out invalid YAML

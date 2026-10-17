@@ -1,3 +1,0 @@
-Error: execution error at (open-products-catalog-service/templates/networkpolicy.yaml:12:4): networkPolicy.databaseCidrs entry "10.0.32.0 /20" is not canonical: no spaces and no leading zeros in an octet or the prefix; list the Aurora subnets' CIDRs only
-
-Use --debug flag to render out invalid YAML
