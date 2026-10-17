@@ -911,7 +911,8 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: rehearsal
-          POSTGRES_PASSWORD: rehearsal
+          # A throwaway CI database that trusts its clients for this job only, so no credential is written here.
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -922,7 +923,6 @@ jobs:
     env:
       PGHOST: localhost
       PGUSER: rehearsal
-      PGPASSWORD: rehearsal
     steps:
       - uses: actions/checkout@v4
       - name: Rehearse schema migration, dev seed and idempotent catalogue import

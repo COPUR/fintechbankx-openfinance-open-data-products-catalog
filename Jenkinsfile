@@ -48,10 +48,12 @@ pipeline {
                     db_container="products-qg-${BUILD_TAG:-local}-$$"
                     db_secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')"
                     trap 'docker rm -f "$db_container" >/dev/null 2>&1 || true' EXIT
+                    export POSTGRES_PASSWORD="${db_secret}"  # docker run -e POSTGRES_PASSWORD reads it from here
                     docker run -d --name "$db_container" -p 127.0.0.1::5432 \\
                       -e POSTGRES_DB=db_of_open_products_catalog_test \\
                       -e POSTGRES_USER=open_products_test \\
-                      -e POSTGRES_PASSWORD="${db_secret}" postgres:16-alpine >/dev/null
+                      -e POSTGRES_PASSWORD postgres:16-alpine >/dev/null
+                    unset POSTGRES_PASSWORD
                     for _ in $(seq 1 60); do
                       docker exec "$db_container" pg_isready -U open_products_test -d db_of_open_products_catalog_test >/dev/null 2>&1 && break
                       sleep 1

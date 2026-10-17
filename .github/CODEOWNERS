@@ -8,3 +8,10 @@
 /.gitlab-ci.yml @COPUR
 /Jenkinsfile @COPUR
 /.github/CODEOWNERS @COPUR
+
+# The secret scan, its exemptions and their self-tests decide what may be published.
+/.github/guardrail-exemptions.txt @COPUR
+/scripts/ci/check-guardrail-fixtures.sh @COPUR
+/scripts/ci/check-guardrail-exemptions.sh @COPUR
+/scripts/ci/guard-upstream-cases.sh @COPUR
+/.gitleaks.toml @COPUR

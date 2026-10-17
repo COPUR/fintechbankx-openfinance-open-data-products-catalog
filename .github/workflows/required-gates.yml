@@ -60,7 +60,8 @@ jobs:
         env:
           POSTGRES_DB: db_of_open_products_catalog_test
           POSTGRES_USER: open_products_test
-          POSTGRES_PASSWORD: open_products_test
+          # A throwaway CI database that trusts its clients for this job only, so no credential is written here.
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -72,7 +73,6 @@ jobs:
       # OpenProductsPostgresIT runs Flyway, the dev seed and the full service against this database.
       TEST_DB_URL: jdbc:postgresql://localhost:5432/db_of_open_products_catalog_test
       TEST_DB_USERNAME: open_products_test
-      TEST_DB_PASSWORD: open_products_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
