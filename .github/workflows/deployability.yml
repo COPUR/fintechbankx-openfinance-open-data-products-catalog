@@ -83,6 +83,11 @@ jobs:
           for bad in "sha256:${digest#sha256:}0" "sha256:ABC" "${digest#sha256:}" "sha512:${digest#sha256:}" "v1@$digest"; do
             must_fail 'is refused: it must be sha256:<64 lowercase hex>' --set-string "image.digest=$bad"
           done
+          # A tag or digest inside image.repository would render repo:tag@digest; a registry port is fine.
+          for bad in ci/x:v1 registry.ci.internal:5000/x:v1 ci/x@sha256:x; do
+            must_fail 'must not carry a tag or digest' --set "image.digest=$digest" --set-string "image.repository=$bad"
+          done
+          helm template ci "$chart" $base --set "image.digest=$digest" --set-string image.repository=registry.ci.internal:5000/x | grep -qF 'image: "registry.ci.internal:5000/x@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' || { echo "host:port/repo did not render by digest"; exit 1; }
           # Every container image of the render is the digest form, and the tag still labels the pods.
           out="$(helm template ci "$chart" $base --set "image.digest=$digest" --set image.tag=${{ github.sha }})"
           imgs="$(grep -E '^ *image: ' <<< "$out" | sed -E 's/^ *image: //; s/"//g' | sort -u)"

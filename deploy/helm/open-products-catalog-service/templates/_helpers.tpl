@@ -225,6 +225,9 @@ pods (the version); "latest" in any case is still refused there, since it would 
 */}}
 {{- define "products.image" -}}
 {{- $repository := required "image.repository is required" .Values.image.repository -}}
+{{- if regexMatch "[:@]" (regexReplaceAll "^[^/]*/" $repository "") -}}
+{{- fail (printf "image.repository must not carry a tag or digest, got %q: the image is repository@image.digest (a registry host:port is allowed)" $repository) -}}
+{{- end -}}
 {{- $tag := toString (.Values.image.tag | default "") -}}
 {{- if eq (lower (trim $tag)) "latest" -}}
 {{- fail (printf "image.tag %q is refused: use the immutable tag the pipeline built (the git SHA); a mutable tag lets a restarted pod run another build than the one released" $tag) -}}
