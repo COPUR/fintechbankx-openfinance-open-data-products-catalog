@@ -116,7 +116,7 @@ aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,Attribut
   --query 'Events[].CloudTrailEvent' --output text | jq -c 'select(.requestParameters.secretId | test("open-products-catalog-service/db-import")) | {time: .eventTime, who: .userIdentity.arn}'
 ```
 
-The import role is still one shared password: the ARN in the history is
+The import role still shares one password. The ARN in the history is
 what the script read from STS, and someone who fetched the password could
 connect without the script and type another ARN. The database refuses import
 changes without an ARN, and CloudTrail shows who fetched the password; see
