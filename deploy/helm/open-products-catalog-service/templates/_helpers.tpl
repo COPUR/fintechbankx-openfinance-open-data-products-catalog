@@ -218,16 +218,20 @@ value of this chart that feeds one of the guard's routes; a key left out is neve
 {{- end -}}
 
 {{/*
-The image reference "<image.repository>:<image.tag>". image.tag is the immutable tag the pipeline
-built (the git SHA): it has no default (empty fails as required), and "latest" in any case is refused,
-since a mutable tag lets a restarted pod run another build than the one released. The chart takes no
-digest.
+The image reference "<image.repository>@<image.digest>": the digest the pipeline built and cosign
+verified (helm-deploy passes it as image.digest and its render guard refuses any other image form).
+image.digest has no default and must be sha256:<64 hex>. image.tag is optional and only labels the
+pods (the version); "latest" in any case is still refused there, since it would name another build.
 */}}
 {{- define "products.image" -}}
 {{- $repository := required "image.repository is required" .Values.image.repository -}}
-{{- $tag := toString (required "image.tag is required" .Values.image.tag) -}}
+{{- $tag := toString (.Values.image.tag | default "") -}}
 {{- if eq (lower (trim $tag)) "latest" -}}
 {{- fail (printf "image.tag %q is refused: use the immutable tag the pipeline built (the git SHA); a mutable tag lets a restarted pod run another build than the one released" $tag) -}}
 {{- end -}}
-{{- printf "%s:%s" $repository $tag -}}
+{{- $digest := toString (required "image.digest is required: the chart renders images only as repository@digest" .Values.image.digest) -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail (printf "image.digest %q is refused: it must be sha256:<64 lowercase hex>, the digest the pipeline built and signed" $digest) -}}
+{{- end -}}
+{{- printf "%s@%s" $repository $digest -}}
 {{- end -}}

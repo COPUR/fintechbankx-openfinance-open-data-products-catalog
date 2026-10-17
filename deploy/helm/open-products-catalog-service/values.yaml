@@ -6,7 +6,8 @@ namespace: open-finance
 
 image:
   repository: ""   # e.g. <account>.dkr.ecr.<region>.amazonaws.com/fintechbankx/open-products-catalog-service
-  tag: ""          # immutable tag (git SHA); never "latest"
+  digest: ""       # sha256:<64 hex>, the built and signed image; images render as repository@digest
+  tag: ""          # optional, labels the pods only (git SHA); never "latest"
   pullPolicy: IfNotPresent
 
 replicaCount: 2

@@ -428,6 +428,16 @@ service, not returning traffic to the monolith.
 - The operator host or in-VPC CI agent, with its security group in
   `operator_security_group_ids` (section 2.1).
 - The DBA bootstrap in section 2 (three roles) done before the first deploy.
+- Deploys go through the platform `helm-deploy` workflow with
+  `HELM_DRIVER=configmap`: the deploy Role has no access to Secrets, so the
+  release history lives in ConfigMaps and the chart reads no Secret. Every
+  manual `helm` command against the release (`status`, `history`,
+  `rollback`, `upgrade`) needs `HELM_DRIVER=configmap` too, or Helm finds
+  no release. Images render only as `image.repository@image.digest` (the
+  digest cosign verifies); `image.digest` is required. After a database
+  credential rotation, restart the pods
+  (`kubectl rollout restart deployment/open-products-catalog-service -n open-finance`):
+  the chart no longer reads the synced Secrets to roll them itself.
 - The scheduled history-guard integrity check (`fbx_history_guard.verify()`
   must return `armed, intact`) is a **release blocker**. The chart's CronJob
   and pre-upgrade gate (section 2.3) are built; they page through
@@ -490,7 +500,7 @@ service, not returning traffic to the monolith.
 
 **Rollback**
 
-- Release problem (5xx, latency, readiness): `helm rollback open-products-catalog-service <previous revision> -n open-finance`.
+- Release problem (5xx, latency, readiness): `HELM_DRIVER=configmap helm rollback open-products-catalog-service <previous revision> -n open-finance`.
   Migrations are additive, so the previous release runs on the current schema.
 - Catalogue problem (row count, wrong values): re-import the previous signed-off
   CSV with `--full` (section 2, step 4), which also withdraws products the bad

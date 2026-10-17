@@ -56,18 +56,20 @@ jobs:
       - name: Lint and render chart
         run: |
           chart=deploy/helm/open-products-catalog-service
-          args="--set image.repository=ci/open-products-catalog-service --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=ci/open-products-catalog-service/db-migration --set config.DB_URL=jdbc:postgresql://ci-writer.example.internal:5432/db_of_open_products_catalog_ci?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem --set networkPolicy.enabled=true --set networkPolicy.databaseCidrs={10.0.32.0/20}"
+          args="--set image.repository=ci/open-products-catalog-service --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=ci/open-products-catalog-service/db-migration --set config.DB_URL=jdbc:postgresql://ci-writer.example.internal:5432/db_of_open_products_catalog_ci?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem --set networkPolicy.enabled=true --set networkPolicy.databaseCidrs={10.0.32.0/20}"
           helm template ci "$chart" ${args%% --set networkPolicy.enabled=*} > /dev/null
           helm lint "$chart" $args
           helm template ci "$chart" $args > rendered.yaml
           helm template ci "$chart" -f "$chart/values-dev.yaml" $args > /dev/null
-      - name: Chart refuses a mutable image tag (latest) and an empty one
+      - name: Chart renders images only by digest and refuses a mutable tag (latest)
         run: |
-          # image.tag is the immutable tag the pipeline built (the git SHA), never "latest" in any case: a mutable
-          # tag lets a restarted pod run another build than the one released. The chart has no default tag
-          # (an empty one fails as required) and takes no digest. Each case keeps the chart's message.
+          # Every image is image.repository@image.digest, the digest the pipeline built and cosign verifies
+          # (cicd helm-deploy passes image.digest and its render guard refuses any other image form).
+          # image.digest has no default and must be sha256:<64 hex>; image.tag only labels the pods, and
+          # "latest" in any case is still refused there. Each case keeps the chart's message.
           chart=deploy/helm/open-products-catalog-service
           base="--set image.repository=ci/x --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=ci/open-products-catalog-service/db-migration --set config.DB_URL=jdbc:postgresql://ci:5432/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
+          digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           must_fail() {  # <expected text> <helm args...>
             local expect="$1" out; shift
             if out="$(helm template ci "$chart" $base "$@" 2>&1)"; then echo "chart rendered with: $*"; exit 1; fi
@@ -75,15 +77,24 @@ jobs:
             echo "refused as expected: $*"
           }
           for tag in latest Latest LATEST; do
-            must_fail "image.tag \"$tag\" is refused" --set "image.tag=$tag"
+            must_fail "image.tag \"$tag\" is refused" --set "image.digest=$digest" --set "image.tag=$tag"
           done
-          must_fail 'image.tag is required' --set image.tag=
-          # The immutable tag still renders.
-          helm template ci "$chart" $base --set image.tag=${{ github.sha }} > /dev/null
+          must_fail 'image.digest is required' --set image.tag=${{ github.sha }}
+          for bad in "sha256:${digest#sha256:}0" "sha256:ABC" "${digest#sha256:}" "sha512:${digest#sha256:}" "v1@$digest"; do
+            must_fail 'is refused: it must be sha256:<64 lowercase hex>' --set-string "image.digest=$bad"
+          done
+          # Every container image of the render is the digest form, and the tag still labels the pods.
+          out="$(helm template ci "$chart" $base --set "image.digest=$digest" --set image.tag=${{ github.sha }})"
+          imgs="$(grep -E '^ *image: ' <<< "$out" | sed -E 's/^ *image: //; s/"//g' | sort -u)"
+          [ "$imgs" = "ci/x@$digest" ] || { echo "images other than ci/x@$digest rendered: $imgs"; exit 1; }
+          grep -qF 'version: "${{ github.sha }}"' <<< "$out" || { echo "pods not labelled with the tag"; exit 1; }
+          # Without a tag the pods are labelled with the chart's appVersion.
+          helm template ci "$chart" $base --set "image.digest=$digest" > /dev/null
+          echo "images render as ci/x@$digest only"
       - name: Rendering fails without database CIDRs
         run: |
           chart=deploy/helm/open-products-catalog-service
-          if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+          if helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
                --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
                --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true > /dev/null 2> cidr.err; then
             echo "chart rendered with an empty networkPolicy.databaseCidrs"
@@ -94,7 +105,7 @@ jobs:
         run: |
           chart=deploy/helm/open-products-catalog-service
           for cidr in 0.0.0.0/0 ::/0; do
-            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            if helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
                  --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
                  --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
                  --set "networkPolicy.databaseCidrs={10.0.32.0/20,$cidr}" > /dev/null 2> cidr0.err; then
@@ -108,7 +119,7 @@ jobs:
           chart=deploy/helm/open-products-catalog-service
           # Two /1 halves cover everything as well as /0 does.
           for cidrs in '0.0.0.0/1,128.0.0.0/1' '10.0.0.0/7' '::/1,8000::/1' '2001:db8::/31' '10.0.32.0'; do
-            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            if helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
                  --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
                  --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
                  --set "networkPolicy.databaseCidrs={$cidrs}" > /dev/null 2> cidr8.err; then
@@ -118,7 +129,7 @@ jobs:
             grep -q "too broad" cidr8.err
           done
           # The floors themselves are accepted.
-          helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+          helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
             --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
             --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
             --set "networkPolicy.databaseCidrs={10.0.0.0/8,fd00::/32}" > /dev/null
@@ -128,7 +139,7 @@ jobs:
           # Only 10/8, 172.16/12, 192.168/16 and fc00::/7; IPv4-mapped IPv6 is refused.
           for cidr in 8.8.8.0/24 11.0.0.0/8 172.32.0.0/16 172.15.0.0/16 192.169.0.0/16 100.64.0.0/10 \
                       2001:db8::/48 fe80::/64 ::ffff:10.0.0.0/104 ::ffff:a00:0/104 10.0.300.0/24; do
-            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            if helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
                  --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
                  --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
                  --set "networkPolicy.databaseCidrs={$cidr}" > /dev/null 2> private.err; then
@@ -138,7 +149,7 @@ jobs:
             grep -q "private range" private.err
           done
           # Each private range at its floor renders.
-          helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+          helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
             --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
             --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
             --set "networkPolicy.databaseCidrs={10.0.0.0/8,172.16.0.0/12,172.31.255.0/24,192.168.0.0/16,fc00::/32,fdab:cdef::/48}" > /dev/null
@@ -150,7 +161,7 @@ jobs:
           for cidr in '010.0.32.0/20' '10.0.032.0/20' '10.00.32.0/20' '10.0.32.00/24' '10.0.32.0/020' \
                       '10.0.32.0/20 ' ' 10.0.32.0/20' '10.0.32.0 /20'; do
             printf 'networkPolicy:\n  databaseCidrs: ["%s"]\n' "$cidr" > cidr-values.yaml
-            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            if helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
                  --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
                  --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
                  -f cidr-values.yaml > /dev/null 2> canonical.err; then
@@ -161,7 +172,7 @@ jobs:
           done
           rm -f cidr-values.yaml
           # Zero octets and single digits stay valid.
-          helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+          helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
             --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
             --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' --set networkPolicy.enabled=true \
             --set "networkPolicy.databaseCidrs={10.0.0.0/8,10.0.32.0/20,192.168.0.0/16,172.16.0.0/12}" > /dev/null
@@ -171,7 +182,7 @@ jobs:
           for url in 'jdbc:postgresql://ci/x?sslmode=require' \
                      'jdbc:postgresql://ci/x?sslmode=verify-full' \
                      'jdbc:postgresql://ci/x?sslmode=verify-ca&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'; do
-            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            if helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
                  --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
                  --set "config.DB_URL=$url" > /dev/null 2> tls.err; then
               echo "chart rendered with config.DB_URL=$url"
@@ -189,7 +200,7 @@ jobs:
                      "jdbc:postgresql://ci/x?sslmode=disable&sslmode=verify-full&$ca" \
                      "jdbc:postgresql://ci/x?sslmode=verify-full&$ca&sslrootcert=/tmp/other.pem" \
                      "jdbc:postgresql://ci/x?sslmode=verify-full&$ca&SSLMODE=disable"; do
-            if helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+            if helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
                  --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
                  --set "config.DB_URL=$url" > /dev/null 2> tls2.err; then
               echo "chart rendered with config.DB_URL=$url"
@@ -202,7 +213,7 @@ jobs:
         run: |
           chart=deploy/helm/open-products-catalog-service
           base="jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
-          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          common="--set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
           # Each of these can switch certificate or host-name checks off or redirect the connection.
           for extra in sslfactory=org.postgresql.ssl.NonValidatingFactory sslhostnameverifier=x.AllowAll \
                        service=other sslcert=/tmp/c.pem sslkey=/tmp/k.pem loggerLevel=TRACE; do
@@ -229,7 +240,7 @@ jobs:
           # parameter before the '?', no percent-encoded '=' or '&' in the query (allow-listed values
           # included), and nothing in config that can reach the datasource around config.DB_URL.
           chart=deploy/helm/open-products-catalog-service
-          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          common="--set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
           q='sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
           url="jdbc:postgresql://ci/x?$q"
           work="$(mktemp -d)"
@@ -343,7 +354,7 @@ jobs:
       - name: Rendering fails unless each container gets its own database credential
         run: |
           chart=deploy/helm/open-products-catalog-service
-          common="--set image.repository=ci/x --set image.tag=1 --set config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
+          common="--set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 --set config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
           # The import credential (db-import) never reaches the cluster, under either name.
           for pair in 'ci/x/db-import ci/x/db-migration' 'ci/x/db-import/db-app ci/x/db-migration' \
                       'ci/x/db-app ci/x/db-import' 'ci/x/db-app ci/x/db-import/db-migration'; do
@@ -371,7 +382,7 @@ jobs:
       - name: Rendering fails for a Spring config location set through values
         run: |
           chart=deploy/helm/open-products-catalog-service
-          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          common="--set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
           url='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
           # Any spelling Spring's relaxed binding reads as spring.config.import, .location or
           # .additional-location (indexed, lower case, dotted, dash dropped), SPRING_APPLICATION_JSON
@@ -402,7 +413,7 @@ jobs:
       - name: Rendering fails for a Spring profile set through values (startup TLS assertion)
         run: |
           chart=deploy/helm/open-products-catalog-service
-          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          common="--set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
           url='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
           # Round 6 (as in retail and corporate), round 7 (on by default): DatabaseTlsEnvironmentPostProcessor
           # runs whatever the profiles, and only the local profile's application-local.yml switches it
@@ -451,7 +462,7 @@ jobs:
           # case keeps the guard's message so it cannot pass because the render failed for another reason.
           chart=deploy/helm/open-products-catalog-service
           good='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
-          base="--set image.repository=ci/x --set image.tag=x --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=$good"
+          base="--set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=x --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=$good"
           failed=0
           must_fail() {  # <expected text in the error> <helm args...>
             local expect="$1"; shift
@@ -514,7 +525,7 @@ jobs:
             databasePort: "5432\n          x: y"
             otlpPort: "4318\n          x: y"
           VALUES
-          # --set outranks -f, so the hostile render takes image.tag from the file only.
+          # --set outranks -f, so the hostile render takes image.tag from the file only (it reaches the version labels).
           helm template ci "$chart" ${base/--set image.tag=x/} -f "$work/np.yaml" -f "$work/hostile.yaml" > "$work/hostile-out.yaml"
           python3 - "$work/baseline.yaml" "$work/hostile-out.yaml" <<'PY'
           import sys, yaml
@@ -540,7 +551,7 @@ jobs:
               for c, o in zip(spec.get("initContainers", []) + spec["containers"], other.get("initContainers", []) + other["containers"]):
                   assert c.keys() == o.keys(), f"{key}: container fields changed: {sorted(set(o) ^ set(c))}"
                   assert [e["name"] for e in c.get("env", [])] == [e["name"] for e in o.get("env", [])], f"{key}: env names changed"
-                  assert o["image"].startswith("ci/x:x\"\n"), f"{key}: image tag not kept as one value"
+                  assert o["image"] == "ci/x@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", f"{key}: image is not the digest form: {o['image']}"
               vols = {v["name"]: v for v in other["volumes"]}
               assert vols["rds-ca-bundle"]["configMap"].keys() == {"name", "items"}, f"{key}: configMap volume fields changed"
           cm = next(d for (k, _), d in bad.items() if k == "ConfigMap")
@@ -586,7 +597,7 @@ jobs:
           # documents (a Pod) that the guard never sees.
           chart=deploy/helm/open-products-catalog-service
           good='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
-          args="--set image.repository=ci/x --set image.tag=x --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=$good"
+          args="--set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=x --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=$good"
           work="$(mktemp -d)"
           ns_fail() {  # <description> <helm args...>
             local desc="$1"; shift
@@ -622,7 +633,7 @@ jobs:
           # externalSecret.data from values (refused), so the ExternalSecret route is the chart's own entries.
           chart=deploy/helm/open-products-catalog-service
           good='jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
-          base="--set image.repository=ci/x --set image.tag=x --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=$good"
+          base="--set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=x --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=$good"
           failed=0
           must_fail() {  # <expected text in the error> <helm args...>
             local expect="$1"; shift
@@ -712,7 +723,7 @@ jobs:
           # which only application-local.yml and the test resources set. The chart renders no switch
           # and no marker in any spelling; the guard refuses the key in config, extraEnv and JVM options.
           chart=deploy/helm/open-products-catalog-service
-          base="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem --set networkPolicy.databaseCidrs={10.0.32.0/20}"
+          base="--set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration --set config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem --set networkPolicy.databaseCidrs={10.0.32.0/20}"
           for render in --set,networkPolicy.enabled=false --set,networkPolicy.enabled=true; do
             helm template ci "$chart" $base ${render//,/ } > switch.yaml
             python3 - switch.yaml "CronJob/history-guard-check,Deployment/migrate,Deployment/open-products-catalog-service,Job/history-guard-check" <<'PY'
@@ -836,7 +847,7 @@ jobs:
           print("aws profile on every container; history guard check scheduled" + ("; release gate skipped for " + break_glass if break_glass else " and gating upgrades"))
           PY
           python3 guard-check.py rendered.yaml
-          helm template ci "$chart" --set image.repository=ci/x --set image.tag=1 \
+          helm template ci "$chart" --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 \
             --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration \
             --set 'config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem' \
             --set historyGuardCheck.breakGlassTicket=CHG-0001 > break-glass.yaml
@@ -848,7 +859,7 @@ jobs:
           # app.kubernetes.io/component, so both stay on the CronJob's and the gate Job's pod templates.
           # The CronJob is never suspended: no spec.suspend is rendered and no value can set one.
           chart=deploy/helm/open-products-catalog-service
-          common="--set image.repository=ci/x --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
+          common="--set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=1 --set externalSecret.remoteSecretName=ci/x/db-app --set externalSecret.migrationRemoteSecretName=ci/x/db-migration"
           common="$common --set config.DB_URL=jdbc:postgresql://ci/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
           for extra in "" "-f $chart/values-dev.yaml"; do
             helm template ci "$chart" $common $extra > history-guard-check.yaml
@@ -885,7 +896,7 @@ jobs:
           # vendored guard), mapped to this chart's routes; scripts/ci/guard-upstream-cases.sh says how.
           bash scripts/ci/guard-upstream-cases.sh deploy/helm/open-products-catalog-service --database-ca --no-kafka-runtime \
             --stricter 'extraEnv is not supported by this chart: put|must not mention jdbc, ssl, spring, kafka, flyway|spring[.]kafka[.][*] is not set through values' -- \
-            --set image.repository=ci/x --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=ci/open-products-catalog-service/db-migration --set "config.DB_URL=jdbc:postgresql://ci:5432/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
+            --set image.repository=ci/x --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/open-products-catalog-service/db-app --set externalSecret.migrationRemoteSecretName=ci/open-products-catalog-service/db-migration --set "config.DB_URL=jdbc:postgresql://ci:5432/x?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem"
 
   terraform:
     name: deploy/terraform
