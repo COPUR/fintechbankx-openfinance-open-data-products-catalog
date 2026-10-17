@@ -88,6 +88,12 @@ jobs:
             must_fail 'must not carry a tag or digest' --set "image.digest=$digest" --set-string "image.repository=$bad"
           done
           helm template ci "$chart" $base --set "image.digest=$digest" --set-string image.repository=registry.ci.internal:5000/x | grep -qF 'image: "registry.ci.internal:5000/x@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' || { echo "host:port/repo did not render by digest"; exit 1; }
+          # image.tag only names the version labels: a label value (63 chars, alphanumeric at both ends), as the ledger chart.
+          for bad in v1- _v1 v1. aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
+            must_fail 'image.tag must be a label value' --set "image.digest=$digest" --set-string "image.tag=$bad"
+          done
+          must_fail 'image.tag must be a label value' --set "image.digest=$digest" --set-string $'image.tag=x"\n          args: ["--spring.config.import=file:/tmp/x.yml"]'
+          helm template ci "$chart" $base --set "image.digest=$digest" --set-string image.tag=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > /dev/null
           # Every container image of the render is the digest form, and the tag still labels the pods.
           out="$(helm template ci "$chart" $base --set "image.digest=$digest" --set image.tag=${{ github.sha }})"
           imgs="$(grep -E '^ *image: ' <<< "$out" | sed -E 's/^ *image: //; s/"//g' | sort -u)"
@@ -505,8 +511,6 @@ jobs:
           printf 'networkPolicy:\n  enabled: true\n  databaseCidrs: [10.0.32.0/20]\n' > "$work/np.yaml"
           helm template ci "$chart" $base -f "$work/np.yaml" > "$work/baseline.yaml"
           cat > "$work/hostile.yaml" <<'VALUES'
-          image:
-            tag: "x\"\n          args: [\"--spring.config.import=file:/tmp/x.yml\"]"
           config:
             OPEN_PRODUCTS_SEED_ENABLED: "aud\nSPRING_CONFIG_IMPORT: file:/tmp/x.yml"
           # databaseCaBundle.configMapName is pinned to rds-ca-bundle by the guard since 6b6c317: its
@@ -530,7 +534,7 @@ jobs:
             databasePort: "5432\n          x: y"
             otlpPort: "4318\n          x: y"
           VALUES
-          # --set outranks -f, so the hostile render takes image.tag from the file only (it reaches the version labels).
+          # --set outranks -f, so the hostile render takes its values from the file only (a hostile image.tag is refused above).
           helm template ci "$chart" ${base/--set image.tag=x/} -f "$work/np.yaml" -f "$work/hostile.yaml" > "$work/hostile-out.yaml"
           python3 - "$work/baseline.yaml" "$work/hostile-out.yaml" <<'PY'
           import sys, yaml

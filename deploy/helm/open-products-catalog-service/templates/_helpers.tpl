@@ -232,6 +232,9 @@ pods (the version); "latest" in any case is still refused there, since it would 
 {{- if eq (lower (trim $tag)) "latest" -}}
 {{- fail (printf "image.tag %q is refused: use the immutable tag the pipeline built (the git SHA); a mutable tag lets a restarted pod run another build than the one released" $tag) -}}
 {{- end -}}
+{{- if and $tag (or (gt (len $tag) 63) (not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$" $tag))) -}}
+{{- fail (printf "image.tag must be a label value (at most 63 characters of A-Z a-z 0-9 . _ -, alphanumeric at both ends), got %q: it only names the version labels" $tag) -}}
+{{- end -}}
 {{- $digest := toString (required "image.digest is required: the chart renders images only as repository@digest" .Values.image.digest) -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
 {{- fail (printf "image.digest %q is refused: it must be sha256:<64 lowercase hex>, the digest the pipeline built and signed" $digest) -}}
