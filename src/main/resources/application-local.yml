@@ -1,0 +1,7 @@
+# Local runs only (SPRING_PROFILES_ACTIVE=local): a plain local PostgreSQL (DB_URL). The
+# startup TLS check (fintechbankx.tls.enforce, true in application.yml) is switched off
+# here and in the test resources only. The chart refuses every spring.profiles.* value and
+# the fintechbankx.tls.* keys, so this profile never runs in a cluster.
+fintechbankx:
+  tls:
+    enforce: false

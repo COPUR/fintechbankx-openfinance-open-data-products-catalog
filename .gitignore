@@ -1,0 +1,20 @@
+.gradle/
+build/
+**/build/
+*.iml
+.idea/
+/out/
+# Hexagonal port packages are named "out"; never ignore source directories.
+!**/src/**/out/
+
+# Terraform working files
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+
+# helm template output written by the deploy/helm CI job
+/rendered.yaml
+
+# Scratch output of local helm and gate runs
+*.err

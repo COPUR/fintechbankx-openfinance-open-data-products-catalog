@@ -1,0 +1,21 @@
+# Profile for tests that boot the service without PostgreSQL: the catalogue
+# comes from the test-only InMemoryProductCatalogAdapter. Never used at runtime.
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.jpa.JpaRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+
+openproducts:
+  catalog:
+    store: in-memory
+
+management:
+  endpoint:
+    health:
+      group:
+        readiness:
+          include: readinessState

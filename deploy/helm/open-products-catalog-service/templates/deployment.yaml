@@ -1,0 +1,187 @@
+{{- /* Platform guard first (products.guard in _helpers.tpl; README "Vendoring the guard", step 2). */ -}}
+{{- include "products.guard" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "products.name" . }}
+  namespace: {{ include "products.namespace" . | quote }}
+  labels:
+    {{- include "products.labels" . | nindent 4 }}
+  {{- with .Values.historyGuardCheck.breakGlassTicket }}
+  annotations:
+    # Break-glass release: the pre-upgrade history guard gate was skipped (runbook section 2.3).
+    fintechbankx.io/history-guard-break-glass: {{ . | quote }}
+  {{- end }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount | int }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "products.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "products.selectorLabels" . | nindent 8 }}
+        {{- toYaml .Values.podLabels | nindent 8 }}
+        version: {{ .Values.image.tag | quote }}
+        sidecar.istio.io/inject: {{ .Values.mesh.sidecarInject | quote }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # Restarts pods when the secret mapping changes, and on the next
+        # upgrade after a credential rotation (lookup reads the synced Secrets'
+        # data; it is empty under helm template/lint).
+        checksum/secret: {{ printf "%s%v%v" (include (print $.Template.BasePath "/externalsecret.yaml") .) (lookup "v1" "Secret" (include "products.namespace" .) (include "products.dbSecretName" .)).data (lookup "v1" "Secret" (include "products.namespace" .) (include "products.migrationSecretName" .)).data | sha256sum }}
+        {{- if .Values.mesh.sidecarInject }}
+        # Aurora is outside the mesh (PostgreSQL TLS end to end); without this the
+        # migrate init container, which runs before the sidecar, cannot connect.
+        traffic.sidecar.istio.io/excludeOutboundPorts: {{ .Values.networkPolicy.databasePort | quote }}
+        {{- end }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.service.managementPort | toString | quote }}
+        prometheus.io/path: /actuator/prometheus
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name | quote }}
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew | int }}
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "products.selectorLabels" . | nindent 14 }}
+        - maxSkew: {{ .Values.topologySpread.maxSkew | int }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "products.selectorLabels" . | nindent 14 }}
+      {{- if .Values.externalSecret.enabled }}
+      initContainers:
+        # Flyway as the schema owner, then exit (OPEN_PRODUCTS_MIGRATE_ONLY).
+        # Replicas starting together are serialised by Flyway's lock.
+        - name: migrate
+          image: {{ include "products.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "products.name" . }}
+            - secretRef:
+                name: {{ include "products.migrationSecretName" . }}
+          env:
+            # Startup refuses a database URL without verified TLS (DatabaseTlsEnvironmentPostProcessor).
+            - name: SPRING_PROFILES_ACTIVE
+              value: aws
+            - name: OPEN_PRODUCTS_MIGRATE_ONLY
+              value: "true"
+            - name: SPRING_MAIN_WEB_APPLICATION_TYPE
+              value: none
+            # Hibernate validates the migrated schema with the same owner login.
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "products.migrationSecretName" . }}
+                  key: FLYWAY_USER
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "products.migrationSecretName" . }}
+                  key: FLYWAY_PASSWORD
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: rds-ca-bundle
+              mountPath: {{ .Values.databaseCaBundle.mountPath | quote }}
+              readOnly: true
+      {{- end }}
+      containers:
+        - name: open-products-catalog-service
+          image: {{ include "products.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port | int }}
+            - name: management
+              containerPort: {{ .Values.service.managementPort | int }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "products.name" . }}
+            {{- if .Values.externalSecret.enabled }}
+            - secretRef:
+                name: {{ include "products.dbSecretName" . }}
+            {{- end }}
+          env:
+            # Startup refuses a database URL without verified TLS (DatabaseTlsEnvironmentPostProcessor).
+            - name: SPRING_PROFILES_ACTIVE
+              value: aws
+            {{- if .Values.externalSecret.enabled }}
+            # The schema was migrated by the init container; the runtime role
+            # (SELECT on product only) could not run Flyway anyway.
+            - name: SPRING_FLYWAY_ENABLED
+              value: "false"
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: management
+            periodSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: rds-ca-bundle
+              mountPath: {{ .Values.databaseCaBundle.mountPath | quote }}
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # Platform trust-manager bundle; JDBC verifies Aurora's certificate with it.
+        - name: rds-ca-bundle
+          configMap:
+            name: {{ .Values.databaseCaBundle.configMapName | quote }}
+            items:
+              - key: {{ .Values.databaseCaBundle.key | quote }}
+                path: {{ .Values.databaseCaBundle.key | quote }}
