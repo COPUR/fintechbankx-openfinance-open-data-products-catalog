@@ -2,4 +2,9 @@
 # script that verifies it, and the file that pins its digest need a platform owner's review.
 /deploy/helm/*/templates/_fbx_helpers.tpl @COPUR
 /scripts/ci/verify-vendored-guard.sh @COPUR
-/.github/workflows/deployability.yml @COPUR
+
+# The CI definitions decide which gates run, and this file decides who reviews them.
+/.github/workflows/ @COPUR
+/.gitlab-ci.yml @COPUR
+/Jenkinsfile @COPUR
+/.github/CODEOWNERS @COPUR
