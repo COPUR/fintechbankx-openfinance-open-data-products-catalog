@@ -85,11 +85,12 @@ Read the value into the environment of the one command that needs it, never
 into a file, ticket or shell history:
 
 ```sh
-export PGPASSWORD="$(aws secretsmanager get-secret-value \
+import_secret="$(aws secretsmanager get-secret-value \
   --secret-id <env>/open-products-catalog-service/db-import \
   --query SecretString --output text | jq -r .password)"
+export PGPASSWORD="${import_secret}"
 # ... run the step, then:
-unset PGPASSWORD
+unset PGPASSWORD import_secret
 ```
 
 **TLS**: connect with `sslmode=verify-full` against the Amazon RDS CA bundle,

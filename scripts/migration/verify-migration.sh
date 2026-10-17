@@ -62,9 +62,9 @@ import_secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 admin_secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 
 psql_q() { psql -X -q -v ON_ERROR_STOP=1 "$@"; }
-as_owner() { PGUSER="$owner" PGPASSWORD="$owner_secret" "$@"; }
-as_app() { PGUSER="$app" PGPASSWORD="$app_secret" "$@"; }
-as_admin() { PGUSER="$admin" PGPASSWORD="$admin_secret" "$@"; }
+as_owner() { PGUSER="$owner" PGPASSWORD="${owner_secret}" "$@"; }
+as_app() { PGUSER="$app" PGPASSWORD="${app_secret}" "$@"; }
+as_admin() { PGUSER="$admin" PGPASSWORD="${admin_secret}" "$@"; }
 # Stand-in for the AWS CLI: the import asks STS who the operator is.
 operator_arn="arn:aws:sts::111122223333:assumed-role/CatalogueOperator/rehearsal"
 mkdir -p "$work/bin"
@@ -76,7 +76,7 @@ echo "$FAKE_AWS_ARN"
 STUB
 chmod +x "$work/bin/aws"
 with_aws() { PATH="$work/bin:$PATH" FAKE_AWS_ARN="$operator_arn" "$@"; }
-as_importer() { PGUSER="$importer" PGPASSWORD="$import_secret" IMPORT_OPERATOR=rehearsal with_aws "$@"; }
+as_importer() { PGUSER="$importer" PGPASSWORD="${import_secret}" IMPORT_OPERATOR=rehearsal with_aws "$@"; }
 # import [--full|--delta] <csv>: runs the import script as the import role.
 import() {
   local mode=()
@@ -253,20 +253,20 @@ fi
 grep -q "refusing to import as $owner" "$work/owner.err" || { cat "$work/owner.err" >&2; exit 1; }
 echo "ok   import refuses any role but the import role"
 
-if PGUSER="$importer" PGPASSWORD="$import_secret" "$root/db/import/import-products.sh" "dbname=$db" "$root/db/import/products.example.csv" 2> "$work/nooperator.err"; then
+if PGUSER="$importer" PGPASSWORD="${import_secret}" "$root/db/import/import-products.sh" "dbname=$db" "$root/db/import/products.example.csv" 2> "$work/nooperator.err"; then
   echo "FAIL import ran without IMPORT_OPERATOR" >&2
   exit 1
 fi
 echo "ok   import requires IMPORT_OPERATOR"
 
-if PGUSER="$importer" PGPASSWORD="$import_secret" IMPORT_OPERATOR=rehearsal PATH="$work/bin:$PATH" \
+if PGUSER="$importer" PGPASSWORD="${import_secret}" IMPORT_OPERATOR=rehearsal PATH="$work/bin:$PATH" \
      "$root/db/import/import-products.sh" "dbname=$db" "$root/db/import/products.example.csv" 2> "$work/nocaller.err"; then
   echo "FAIL import ran without an AWS caller identity" >&2
   exit 1
 fi
 grep -q "AWS caller identity" "$work/nocaller.err" || { cat "$work/nocaller.err" >&2; exit 1; }
 echo "ok   import requires an AWS caller identity"
-if PGUSER="$importer" PGPASSWORD="$import_secret" IMPORT_OPERATOR=rehearsal PATH="$work/bin:$PATH" FAKE_AWS_ARN="arn:aws:iam::111122223333:root" \
+if PGUSER="$importer" PGPASSWORD="${import_secret}" IMPORT_OPERATOR=rehearsal PATH="$work/bin:$PATH" FAKE_AWS_ARN="arn:aws:iam::111122223333:root" \
      "$root/db/import/import-products.sh" "dbname=$db" "$root/db/import/products.example.csv" 2> "$work/root.err"; then
   echo "FAIL import ran as the AWS account root" >&2
   exit 1

@@ -51,7 +51,7 @@ pipeline {
                     docker run -d --name "$db_container" -p 127.0.0.1::5432 \\
                       -e POSTGRES_DB=db_of_open_products_catalog_test \\
                       -e POSTGRES_USER=open_products_test \\
-                      -e POSTGRES_PASSWORD="$db_secret" postgres:16-alpine >/dev/null
+                      -e POSTGRES_PASSWORD="${db_secret}" postgres:16-alpine >/dev/null
                     for _ in $(seq 1 60); do
                       docker exec "$db_container" pg_isready -U open_products_test -d db_of_open_products_catalog_test >/dev/null 2>&1 && break
                       sleep 1
@@ -60,7 +60,7 @@ pipeline {
                     db_port="$(docker port "$db_container" 5432/tcp | head -n 1 | sed 's/.*://')"
                     export TEST_DB_URL="jdbc:postgresql://127.0.0.1:${db_port}/db_of_open_products_catalog_test"
                     export TEST_DB_USERNAME=open_products_test
-                    export TEST_DB_PASSWORD="$db_secret"
+                    export TEST_DB_PASSWORD="${db_secret}"
                   fi
                   ./gradlew -p "${SERVICE_DIR}" --no-daemon clean check
                 '''
@@ -106,7 +106,7 @@ pipeline {
                     echo "cosign key not configured; skipping image signing"
                   fi
 
-                  if command -v docker >/dev/null 2>&1 && [ -n "${DOCKER_REGISTRY:-}" ] && [ -n "${DOCKER_USERNAME:-}" ] && [ -n "${DOCKER_PASSWORD:-}" ]; then
+                  if command -v docker >/dev/null 2>&1 && [ -n "${DOCKER_REGISTRY:-}" ] && [ -n "${DOCKER_USERNAME:-}" ] && [ -n "${DOCKER_PASSWORD-}" ]; then
                     echo "${DOCKER_PASSWORD}" | docker login "${DOCKER_REGISTRY}" --username "${DOCKER_USERNAME}" --password-stdin
                     docker push "${IMAGE_NAME}"
                   else
