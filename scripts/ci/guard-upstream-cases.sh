@@ -3,17 +3,20 @@
 #
 # Reproduces, against this chart's adapter, the refusal cases that the platform repository
 # fintechbankx-platform-delivery-iac-cicd-templates added with the guard this chart vendors
-# (commits a4f0072..6b6c317), each with the upstream error pattern so a case cannot pass because the
+# (commits a4f0072..73e1881), each with the upstream error pattern so a case cannot pass because the
 # render failed for another reason. It does NOT run every upstream case: the case table below names,
 # per row, the upstream suite file and `it:` title (or validate-chart.sh must_fail / vendored_must_fail
 # case) the row reproduces, and the list "Not reproduced" says which upstream cases are left out and why.
 #
-# Upstream sources (path under charts/fintechbankx-service/tests/ unless noted, at 6b6c317):
+# Upstream sources (path under charts/fintechbankx-service/tests/ unless noted, at 73e1881; the guard was
+# re-vendored at 6b6c317 and again at 73e1881):
 #   database_ca_test.yaml             new in the range; rows reproduce its mountPath/key/configMapName rejections
 #   kafka_client_tls_names_test.yaml  new in the range; rows reproduce its rejections (not its accept cases)
 #   kafka_runtime_required_test.yaml  new in the range; rows reproduce its three "without kafka.runtime" rejections
 #   documentdb_names_test.yaml        new in the range; rows reproduce its rejections (not its accept cases)
 #   property_reading_names_test.yaml  new in the range; rows reproduce its rejections and its one control
+#   schema_management_names_test.yaml new in 6b6c317..73e1881; rows reproduce every case, its two controls too
+#   unmatched_bracket_names_test.yaml new in 6b6c317..73e1881; rows reproduce every case, its control too
 #   scripts/ci/validate-chart.sh      must_fail and vendored_must_fail cases added in the range
 # Each row ends with the field upstream = "<suite file>: it: <title>" or "validate-chart.sh: must_fail:
 # <name>" (several sources joined by " ; " where one row reproduces more than one).
@@ -41,12 +44,21 @@
 #   5. property_reading_names_test.yaml: "accepts spring.kafka.properties.ssl.endpoint_identification.algorithm
 #      https (control)". Reason: a render assertion; its other control ("accepts other names with '_'") is
 #      reproduced by the two pass rows.
-#   6. relaxed_binding_names_test.yaml (changed in a4f0072..6b6c317, 7 lines) and scripts/ci/test/
+#   6. relaxed_binding_names_test.yaml (changed in a4f0072..73e1881, 7 lines) and scripts/ci/test/
 #      verify-vendored-guard.test.mjs / scripts/ci/verify-vendored-guard.sh: tests of the vendoring
 #      check itself, not guard refusal cases; not part of this script.
 #   7. validate-chart.sh: the fixture check "adapter without databaseCa.configMapName" (it edits the
 #      fixture adapter with sed). Reason: it tests the fixture's adapter, not this chart's.
 #   8. Rows whose route this chart does not have are counted "not applicable" (see below), not passed.
+#   9. kafka_sasl_names_test.yaml and spring_main_names_test.yaml (new in 6b6c317..73e1881): only the
+#      spring.main.* and Kafka SASL/JAAS cases that validate-chart.sh added in the same range are rows
+#      here. Reason: this chart sets no Kafka SASL or spring.main.* value and the guard refuses both
+#      families by prefix on every route, so the suites' other spellings exercise the same rule; they
+#      still run upstream.
+#  10. The edits in 6b6c317..73e1881 to existing suites (jvm_options_test.yaml, kafka_client_tls_names_test.yaml,
+#      spring_config_profiles_test.yaml, ssl_bundle_names_test.yaml and the one-line edits elsewhere) and
+#      validate-chart.sh's /tmp to ./ path changes in existing cases. Reason: they change upstream inputs or
+#      fixtures, not which names are refused; the rows above that reproduce those suites still pass.
 #
 # Upstream routes map to this chart's values:
 #   config.*, extraEnv (value or valueFrom)   as upstream (every adapter passes both to fbx.guard);
@@ -65,12 +77,16 @@
 # externalSecret.extraData / javaToolOptions / databaseCaBundle, or the chart's templates hand the value
 # to the guard) and the matching flag was not passed, the row counts as FAILED and the message names
 # the flag to pass, so a forgotten flag cannot turn a case into a silent skip.
+# --stricter <ERE> names refusals of this chart's own adapter (its _helpers.tpl, not the vendored guard) that
+# are stricter than the guard: a control row the chart refuses with such a message is counted on its own line
+# ("refused by this chart's stricter rule"), every other refusal of a control row FAILS. The pattern must match
+# only the chart's own messages, never a guard message.
 # Exits 0 when every applicable case passes, 1 otherwise (each failure is printed).
 set -euo pipefail
 
-[ "$#" -ge 1 ] || { echo "usage: $0 <chart-dir> [--strimzi <set>] [--extra-data] [--java-tool-options] [--database-ca] [--no-kafka-runtime] -- <helm args>" >&2; exit 2; }
+[ "$#" -ge 1 ] || { echo "usage: $0 <chart-dir> [--strimzi <set>] [--extra-data] [--java-tool-options] [--database-ca] [--no-kafka-runtime] [--stricter <ERE>] -- <helm args>" >&2; exit 2; }
 chart="$1"; shift
-strimzi=""; extra_data=0; jto=0; dbca=0; no_kafka=0
+strimzi=""; extra_data=0; jto=0; dbca=0; no_kafka=0; stricter=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --strimzi) strimzi="$2"; shift 2 ;;
@@ -78,6 +94,7 @@ while [ "$#" -gt 0 ]; do
     --java-tool-options) jto=1; shift ;;
     --database-ca) dbca=1; shift ;;
     --no-kafka-runtime) no_kafka=1; shift ;;
+    --stricter) stricter="$2"; shift 2 ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -98,7 +115,7 @@ if [ -d "$chart/templates" ]; then
 fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-n=0; passed=0; failed=0; skipped=0
+n=0; passed=0; failed=0; skipped=0; strict=0
 
 check() {  # <description> <expected ERE or "-" for must render> <helm args...>
   local desc="$1" expect="$2" out; shift 2
@@ -106,7 +123,15 @@ check() {  # <description> <expected ERE or "-" for must render> <helm args...>
     if [ "$expect" = "-" ]; then passed=$((passed + 1)); echo "renders as expected: $desc"; return; fi
     echo "FAIL: $desc must be refused"; failed=$((failed + 1)); return
   fi
-  if [ "$expect" = "-" ]; then echo "FAIL: $desc must render: $out"; failed=$((failed + 1)); return; fi
+  if [ "$expect" = "-" ]; then
+    # A control the guard accepts can still be refused by this chart's own, stricter adapter rule (for example a
+    # chart that renders no extraEnv at all). --stricter names those messages; they come from the chart's own
+    # _helpers.tpl, never from the vendored guard, so the guard has already accepted the value.
+    if [ -n "$stricter" ] && grep -qE -- "$stricter" <<< "$out"; then
+      strict=$((strict + 1)); echo "control accepted by the guard, refused by this chart's stricter rule: $desc"; return
+    fi
+    echo "FAIL: $desc must render: $out"; failed=$((failed + 1)); return
+  fi
   if ! grep -qE -- "$expect" <<< "$out"; then
     echo "FAIL: $desc failed for another reason (expected /$expect/): $out"; failed=$((failed + 1)); return
   fi
@@ -121,7 +146,8 @@ while IFS='|' read -r route flags name value expect upstream; do
   case "$route" in ''|'#'*) continue ;; esac
   extra=()
   if [ "$no_kafka" -eq 1 ] && [[ "$expect" == *"must be SASL_SSL or SSL"* ]]; then
-    expect="config[.]$(sed -e 's/[][\.*^$(){}+?|]/\\&/g' <<< "$name") is set but kafka[.]runtime is empty"
+    where=config; [ "$route" = config ] || where=extraEnv
+    expect="$where[.]$(sed -e 's/[][\.*^$(){}+?|]/\\&/g' <<< "$name") is set but kafka[.]runtime is empty"
   fi
   if [ "$flags" = strimzi ] && [ -n "$strimzi" ]; then extra=(--set "$strimzi"); fi
   case "$route" in
@@ -129,6 +155,8 @@ while IFS='|' read -r route flags name value expect upstream; do
       check "config.$name" "$expect" "${extra[@]}" -f "$(file 'config:' "  '$name': '$value'")" ;;
     pass)
       check "config.$name (control)" - -f "$(file 'config:' "  '$name': '$value'")" ;;
+    envpass)
+      check "extraEnv $name (control)" - -f "$(file 'extraEnv:' "  - name: '$name'" "    value: '$value'")" ;;
     env)
       check "extraEnv $name (value)" "$expect" "${extra[@]}" -f "$(file 'extraEnv:' "  - name: '$name'" "    value: '$value'")" ;;
     envfrom)
@@ -153,6 +181,9 @@ while IFS='|' read -r route flags name value expect upstream; do
       else
         check "config.JAVA_TOOL_OPTIONS $value" "config[.]JAVA_TOOL_OPTIONS${expect#javaToolOptions}" -f "$(file 'config:' "  JAVA_TOOL_OPTIONS: '$value'")"
       fi ;;
+    jtopass)
+      if [ "$jto" -eq 1 ]; then check "javaToolOptions $value (control)" - --set-string "javaToolOptions=$value"
+      else check "config.JAVA_TOOL_OPTIONS $value (control)" - -f "$(file 'config:' "  JAVA_TOOL_OPTIONS: '$value'")"; fi ;;
     dbca)
       if [ "$dbca" -eq 0 ]; then
         if [ "$has_dbca" -eq 1 ]; then failed=$((failed + 1)); echo "FAIL: databaseCaBundle.$name skipped as not applicable, but $chart has databaseCaBundle: pass --database-ca"; continue; fi
@@ -254,7 +285,58 @@ pass||logging.level.com_example_loan|DEBUG|-|property_reading_names_test.yaml: i
 envfrom||SPRING_KAFKA_PRODUCER_PROPERTIES_SSL_TRUSTSTORE_CERTIFICATES|{configMapKeyRef: {name: other, key: ca}}|extraEnv must not set SPRING_KAFKA_PRODUCER_PROPERTIES_SSL_TRUSTSTORE_CERTIFICATES|validate-chart.sh: must_fail: extraEnv SPRING_KAFKA_PRODUCER_PROPERTIES_SSL_TRUSTSTORE_CERTIFICATES from valueFrom
 config|strimzi|KAFKA_TLS_CERT|-----BEGIN CERTIFICATE-----|config.KAFKA_TLS_CERT is not allowed|validate-chart.sh: must_fail: config KAFKA_TLS_CERT (kafka.runtime strimzi)
 envfrom|strimzi|KAFKA_TLS_KEY|{configMapKeyRef: {name: other, key: user.key}}|extraEnv KAFKA_TLS_KEY must come from valueFrom.secretKeyRef|validate-chart.sh: vendored_must_fail: additionalEnv KAFKA_TLS_KEY from configMapKeyRef (strimzi)
+config||SPRING_JPA_HIBERNATE_DDL_AUTO|create-drop|config.SPRING_JPA_HIBERNATE_DDL_AUTO is not allowed: a schema-management setting|schema_management_names_test.yaml: it: rejects config SPRING_JPA_HIBERNATE_DDL_AUTO (env form) ; validate-chart.sh: must_fail: config SPRING_JPA_HIBERNATE_DDL_AUTO (schema management)
+config||spring.jpa.generate-ddl|true|config.spring.jpa.generate-ddl is not allowed: a schema-management setting|schema_management_names_test.yaml: it: rejects config spring.jpa.generate-ddl (dotted, kebab case)
+config||SPRING_JPA_PROPERTIES_HIBERNATE_HBM2DDL_AUTO|update|config.SPRING_JPA_PROPERTIES_HIBERNATE_HBM2DDL_AUTO is not allowed: a schema-management setting|schema_management_names_test.yaml: it: rejects config SPRING_JPA_PROPERTIES_HIBERNATE_HBM2DDL_AUTO (raw Hibernate property through spring.jpa.properties)
+env||SPRING_SQL_INIT_MODE|always|extraEnv must not set SPRING_SQL_INIT_MODE \(value or valueFrom\): a schema-management setting|schema_management_names_test.yaml: it: rejects extraEnv SPRING_SQL_INIT_MODE (value)
+envfrom||spring.sql.init.schema-locations|{configMapKeyRef: {name: other, key: schema}}|extraEnv must not set spring.sql.init.schema-locations \(value or valueFrom\): a schema-management setting|schema_management_names_test.yaml: it: rejects extraEnv spring.sql.init.schema-locations from valueFrom
+config||SPRING_SQLINIT_MODE|always|config.SPRING_SQLINIT_MODE is not allowed: a schema-management setting|schema_management_names_test.yaml: it: rejects config SPRING_SQLINIT_MODE (no separator inside sql.init)
+es||hibernate.hbm2ddl.auto|ddl|externalSecret.data must not materialise hibernate.hbm2ddl.auto \(keep only the credentials in the secret\): a schema-management setting|schema_management_names_test.yaml: it: rejects externalSecret.data materialising hibernate.hbm2ddl.auto ; validate-chart.sh: must_fail: externalSecret.data hibernate.hbm2ddl.auto
+es||jakarta.persistence.schema-generation.database.action|action|externalSecret.extraData must not materialise jakarta.persistence.schema-generation.database.action .*: a schema-management setting|schema_management_names_test.yaml: it: rejects externalSecret.extraData materialising jakarta.persistence.schema-generation.database.action
+config||JAVAX_PERSISTENCE_SCHEMA_GENERATION_DATABASE_ACTION|drop-and-create|config.JAVAX_PERSISTENCE_SCHEMA_GENERATION_DATABASE_ACTION is not allowed: a schema-management setting|schema_management_names_test.yaml: it: rejects config JAVAX_PERSISTENCE_SCHEMA_GENERATION_DATABASE_ACTION (env form)
+config||spring.j_pa.hibernate.ddl-auto|create|config.spring.j_pa.hibernate.ddl-auto is not allowed: a schema-management setting|schema_management_names_test.yaml: it: rejects config spring.j_pa.hibernate.ddl-auto ('_' inside an element, property reading)
+env||spring[jpa].generate-ddl|true|extraEnv must not set spring\[jpa\].generate-ddl .*: a schema-management setting|schema_management_names_test.yaml: it: rejects extraEnv spring[jpa].generate-ddl (bracket element)
+env||_SPRING_JPA_DEFER_DATASOURCE_INITIALIZATION|true|extraEnv must not set _SPRING_JPA_DEFER_DATASOURCE_INITIALIZATION .*: a schema-management setting|schema_management_names_test.yaml: it: rejects extraEnv _SPRING_JPA_DEFER_DATASOURCE_INITIALIZATION (leading '_', environment reading)
+es||Hibernate.Hbm2ddl.Auto|ddl|externalSecret.data must not materialise Hibernate.Hbm2ddl.Auto .*: a schema-management setting|schema_management_names_test.yaml: it: rejects externalSecret.data materialising Hibernate.Hbm2ddl.Auto (mixed case)
+pass||SPRING_DATA_JPA_REPOSITORIES_BOOTSTRAP_MODE|deferred|-|schema_management_names_test.yaml: it: accepts names that only start like the schema-management families (control) (first name)
+pass||SPRING_JPAX_NOTE|x|-|schema_management_names_test.yaml: it: accepts names that only start like the schema-management families (control) (second name)
+pass||APP_HIBERNATE_STATS|off|-|schema_management_names_test.yaml: it: accepts names that only start like the schema-management families (control) (third name)
+pass||HIBERNATES_NOTE|x|-|schema_management_names_test.yaml: it: accepts names that only start like the schema-management families (control) (fourth name)
+pass||JAKARTA_MAIL_HOST|smtp.example.test|-|schema_management_names_test.yaml: it: accepts names that only start like the schema-management families (control) (fifth name)
+envpass||spring.sqlx.mode|off|-|schema_management_names_test.yaml: it: accepts names that only start like the schema-management families (control) (extraEnv name)
+jto|||-XX:MaxRAMPercentage=75 -Dspring.jpa.hibernate.ddl-auto=create-drop|javaToolOptions must not mention .*spring.jpa, spring.sql.init, hibernate|schema_management_names_test.yaml: it: rejects javaToolOptions with -Dspring.jpa.hibernate.ddl-auto
+config||JDK_JAVA_OPTIONS|-Dhibernate.hbm2ddl.auto=update|config.JDK_JAVA_OPTIONS must not mention .*hibernate|schema_management_names_test.yaml: it: rejects config JDK_JAVA_OPTIONS with -Dhibernate.hbm2ddl.auto (Hibernate reads system properties)
+env||JAVA_TOOL_OPTIONS|-Djakarta.persistence.schema-generation.database.action=drop-and-create|extraEnv.JAVA_TOOL_OPTIONS must not mention .*jakarta.persistence|schema_management_names_test.yaml: it: rejects extraEnv JAVA_TOOL_OPTIONS with -Djakarta.persistence.schema-generation.database.action
+env||_JAVA_OPTIONS|-Djavax.persistence.schema-generation.database.action=create|extraEnv._JAVA_OPTIONS must not mention .*javax.persistence|schema_management_names_test.yaml: it: rejects extraEnv _JAVA_OPTIONS with -Djavax.persistence.schema-generation.database.action
+jto|||-Dspring.sql.init.mode=always|javaToolOptions must not mention .*spring.sql.init|schema_management_names_test.yaml: it: rejects javaToolOptions with -Dspring.sql.init.mode
+jto|||-Dspring.j_pa.generate-ddl=true|javaToolOptions must not mention .*spring.jpa|schema_management_names_test.yaml: it: rejects javaToolOptions with -Dspring.j_pa.generate-ddl ('_' inside an element)
+jtopass|||-XX:MaxRAMPercentage=75 -Dspring.data.jpa.repositories.bootstrap-mode=deferred -Dapp.persistent=true|-|schema_management_names_test.yaml: it: accepts JVM options that mention none of the families (control)
+jto|||-Djakarta.persistence.schema-generation.database.action=drop-and-create|javaToolOptions must not mention .*jakarta.persistence|validate-chart.sh: must_fail: javaToolOptions with -Djakarta.persistence.schema-generation.database.action
+env||spring.J]PA.generate-ddl|true|extraEnv must not set spring.J\]PA.generate-ddl \(value or valueFrom\): a schema-management setting|unmatched_bracket_names_test.yaml: it: rejects extraEnv spring.J]PA.generate-ddl ; validate-chart.sh: vendored_must_fail: additionalEnv spring.J]PA.generate-ddl (unmatched bracket)
+env||-s]pring.sql.init.mode|always|extraEnv must not set -s\]pring.sql.init.mode \(value or valueFrom\): a schema-management setting|unmatched_bracket_names_test.yaml: it: rejects extraEnv -s]pring.sql.init.mode
+env||-SPRIN]G_JPA_HIBERNATE_DDLAUTO|create-drop|extraEnv must not set -SPRIN\]G_JPA_HIBERNATE_DDLAUTO \(value or valueFrom\): a schema-management setting|unmatched_bracket_names_test.yaml: it: rejects extraEnv -SPRIN]G_JPA_HIBERNATE_DDLAUTO
+env||S]PRING.profiles.active|local|extraEnv must not set S\]PRING.profiles.active \(value or valueFrom\): a profile can activate|unmatched_bracket_names_test.yaml: it: rejects extraEnv S]PRING.profiles.active
+env||spring.kafka.security.proto]col|PLAINTEXT|extraEnv.spring.kafka.security.proto\]col must be SASL_SSL or SSL|unmatched_bracket_names_test.yaml: it: checks the value of extraEnv spring.kafka.security.proto]col
+envpass||spring.kafka.properties[client.id]|loan-lifecycle|-|unmatched_bracket_names_test.yaml: it: accepts a matched index, spring.kafka.properties[client.id]
+config||SPRING_MAIN_LAZY_INITIALIZATION|true|config.SPRING_MAIN_LAZY_INITIALIZATION is not allowed: a spring.main.\* property|validate-chart.sh: must_fail: config SPRING_MAIN_LAZY_INITIALIZATION (spring.main.* by prefix)
+envfrom||spring.main.sources|{configMapKeyRef: {name: other, key: sources}}|extraEnv must not set spring.main.sources|validate-chart.sh: must_fail: extraEnv spring.main.sources from valueFrom
+jto|||-Dspring.main.lazy-initialization=true|javaToolOptions must not mention .*spring.main|validate-chart.sh: must_fail: javaToolOptions with -Dspring.main.lazy-initialization
+config||SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG|x.LoginModule required;|config.SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG is not allowed: a Kafka SASL or JAAS setting|validate-chart.sh: must_fail: config SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG (Kafka SASL login module)
+es||SPRING_KAFKA_JAAS_ENABLED|jaas|externalSecret.data must not materialise SPRING_KAFKA_JAAS_ENABLED|validate-chart.sh: must_fail: externalSecret.data SPRING_KAFKA_JAAS_ENABLED (JVM-wide JAAS login module)
+jto|||-Djava.security.auth.login.config=./client.conf|javaToolOptions must not mention .*java.security.auth|validate-chart.sh: must_fail: javaToolOptions with -Djava.security.auth.login.config (JVM-wide JAAS file) ; validate-chart.sh: vendored_must_fail: jvmOptions with -Djava.security.auth.login.config (JVM-wide JAAS file)
+config||SPRING_MAIN_LAZYINITIALIZATION|true|config.SPRING_MAIN_LAZYINITIALIZATION is not allowed: a spring.main.\* property|validate-chart.sh: vendored_must_fail: env SPRING_MAIN_LAZYINITIALIZATION (spring.main.*)
+config||spring.main.sources|file:./beans.xml|config.spring.main.sources is not allowed: a spring.main.\* property|validate-chart.sh: vendored_must_fail: env spring.main.sources (an XML file of bean definitions)
+envfrom||spring.ma_in.allow-bean-definition-overriding|{secretKeyRef: {name: other, key: abdo}}|extraEnv must not set spring.ma_in.allow-bean-definition-overriding|validate-chart.sh: vendored_must_fail: additionalEnv spring.ma_in.allow-bean-definition-overriding from valueFrom ('_' inside an element)
+es||SPRING_MAIN_SOURCES_0_|sources|externalSecret.data must not materialise SPRING_MAIN_SOURCES_0_|validate-chart.sh: vendored_must_fail: secret key SPRING_MAIN_SOURCES_0_ (indexed spring.main.sources)
+jto|||-Dspring[main].lazy-initialization=true|javaToolOptions must not mention .*mongodb, spring.main|validate-chart.sh: vendored_must_fail: jvmOptions with -Dspring[main].lazy-initialization
+config||SPRING_JPA_GENERATE_DDL|true|config.SPRING_JPA_GENERATE_DDL is not allowed: a schema-management setting|validate-chart.sh: vendored_must_fail: env SPRING_JPA_GENERATE_DDL (schema management)
+envfrom||spring.sql.init.mode|{secretKeyRef: {name: other, key: mode}}|extraEnv must not set spring.sql.init.mode|validate-chart.sh: vendored_must_fail: additionalEnv spring.sql.init.mode from valueFrom
+jto|||-Dhibernate.hbm2ddl.auto=update|javaToolOptions must not mention .*hibernate|validate-chart.sh: vendored_must_fail: jvmOptions with -Dhibernate.hbm2ddl.auto
+config||SPRING_KAFKA_PROPERTIES_SASL_MECHANISM|PLAIN|config.SPRING_KAFKA_PROPERTIES_SASL_MECHANISM is not allowed: a Kafka SASL or JAAS setting|validate-chart.sh: vendored_must_fail: env SPRING_KAFKA_PROPERTIES_SASL_MECHANISM (Kafka SASL)
+config||SPRING_KAFKA_PROPERTIES_SASLJAASCONFIG|x|config.SPRING_KAFKA_PROPERTIES_SASLJAASCONFIG is not allowed: a Kafka SASL or JAAS setting|validate-chart.sh: vendored_must_fail: env SPRING_KAFKA_PROPERTIES_SASLJAASCONFIG (no boundary after sasl)
+env||spring.kafka.consumer.properties[sasl.jaas.config]|x.LoginModule required;|extraEnv must not set spring.kafka.consumer.properties\[sasl.jaas.config\]|validate-chart.sh: vendored_must_fail: additionalEnv spring.kafka.consumer.properties[sasl.jaas.config] (value)
+es||spring.kafka.jaas.options.password|kafka_password|externalSecret.data must not materialise spring.kafka.jaas.options.password|validate-chart.sh: vendored_must_fail: secret key spring.kafka.jaas.options.password (JAAS login module option)
 CASES
 
-echo "guard-upstream-cases: $passed passed, $failed failed, $skipped not applicable"
+echo "guard-upstream-cases: $passed passed, $failed failed, $skipped not applicable, $strict controls refused by this chart's stricter rule"
 [ "$failed" -eq 0 ]
