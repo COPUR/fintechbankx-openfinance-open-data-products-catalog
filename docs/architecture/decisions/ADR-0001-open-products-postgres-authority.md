@@ -271,7 +271,7 @@ ARN-shaped value. What bounds this:
   `operator_security_group_ids` (no public path);
 - the password is rotated after each production import window (runbook).
 
-### Risk acceptance (Proposed, awaiting sign-off)
+### Risk acceptance (Proposed: product owner accepted, security sign-off open)
 
 | Field | Value |
 |---|---|
@@ -280,8 +280,8 @@ ARN-shaped value. What bounds this:
 | Controls in place | STS caller identity required by the script and by the history trigger (V3); CloudTrail `GetSecretValue` per principal; no public network path; import role cannot delete or touch the history. |
 | Interim rule | The `db-import` password is rotated after every production import window (runbook section 2.1). The platform has accepted rotation as the interim rule. |
 | Target | Per-operator database logins with IAM database authentication: per-operator `rds-db:connect` granted through the platform's operator role and operator-access module (platform has confirmed it provides both); the shared password is then retired. |
-| Accepted by | Security: _pending_. Product owner (Open Data Squad): _pending_. |
-| Review | At the latest when the operator-access module is released, or six months after acceptance. |
+| Accepted by | Product owner: COPUR, 2026-10-18, accepted as interim risk on the 2026-10-08 decision card (answer "Accept as interim risk", relayed 2026-10-18T01:45Z) (the shared import role stays, with the STS caller ARN recorded, CloudTrail, and rotation after each production import, until per-operator IAM database authentication lands). Security: _pending_. |
+| Review | At the latest when the operator-access module is released, or on 2027-04-18 (six months after the product owner's acceptance). |
 
 Not chosen for now: per-operator database logins with IAM database
 authentication (the cluster already has `iam_database_authentication_enabled`).
