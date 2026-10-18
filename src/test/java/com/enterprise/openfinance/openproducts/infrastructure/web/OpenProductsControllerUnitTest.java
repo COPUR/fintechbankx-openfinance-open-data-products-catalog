@@ -10,15 +10,18 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.enterprise.openfinance.openproducts.domain.model.ProductListResult;
 import com.enterprise.openfinance.openproducts.domain.model.ProductOffer;
 import com.enterprise.openfinance.openproducts.domain.port.in.OpenProductsUseCase;
+import com.enterprise.openfinance.openproducts.infrastructure.config.SecurityConfiguration;
 import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.web.servlet.MockMvc;
 
 @WebMvcTest(controllers = OpenProductsController.class)
+@Import(SecurityConfiguration.class)
 class OpenProductsControllerUnitTest {
 
     @Autowired
@@ -33,12 +36,14 @@ class OpenProductsControllerUnitTest {
             new ProductOffer("PCA-001", "Everyday Current", "PCA", "RETAIL", "AED", "0.00", "0.00", Instant.parse("2026-03-01T00:00:00Z"))
         )));
 
-        mockMvc.perform(get("/open-finance/v1/products")
+        mockMvc.perform(get("/open-finance/v1/products?type=pca")
                 .header("X-FAPI-Interaction-ID", "it-001"))
             .andExpect(status().isOk())
             .andExpect(header().exists("ETag"))
+            .andExpect(header().string("Cache-Control", "no-cache"))
             .andExpect(header().string("X-FAPI-Interaction-ID", "it-001"))
             .andExpect(jsonPath("$.Data.Product[0].ProductId").value("PCA-001"))
+            .andExpect(jsonPath("$.Links.Self").value("/open-finance/v1/products?type=pca"))
             .andExpect(jsonPath("$.Meta.TotalRecords").value(1));
     }
 
@@ -58,7 +63,34 @@ class OpenProductsControllerUnitTest {
                 .header("X-FAPI-Interaction-ID", "it-001")
                 .header("If-None-Match", etag))
             .andExpect(status().isNotModified())
+            .andExpect(header().string("Cache-Control", "no-cache"))
+            .andExpect(header().string("X-FAPI-Interaction-ID", "it-001"))
             .andExpect(header().string("X-OF-Cache", "HIT"));
+    }
+
+    @Test
+    void selfLinkIsRelativeAndBuiltFromTheFiltersOnly() {
+        org.assertj.core.api.Assertions.assertThat(OpenProductsController.selfLink(null, " ")).isEqualTo("/open-finance/v1/products");
+        org.assertj.core.api.Assertions.assertThat(OpenProductsController.selfLink(null, " sme ")).isEqualTo("/open-finance/v1/products?segment=sme");
+        org.assertj.core.api.Assertions.assertThat(OpenProductsController.selfLink("PCA", "SME")).isEqualTo("/open-finance/v1/products?type=PCA&segment=SME");
+    }
+
+    @Test
+    void invalidFiltersAreRejectedBeforeTheCatalogueIsRead() throws Exception {
+        mockMvc.perform(get("/open-finance/v1/products?type=" + "A".repeat(31))
+                .header("X-FAPI-Interaction-ID", "it-005"))
+            .andExpect(status().isBadRequest())
+            .andExpect(header().string("X-FAPI-Interaction-ID", "it-005"))
+            .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+            .andExpect(jsonPath("$.message").value("type must match ^[A-Z0-9_-]{2,30}$"))
+            .andExpect(jsonPath("$.interactionId").value("it-005"));
+
+        mockMvc.perform(get("/open-finance/v1/products?segment=sme%27--")
+                .header("X-FAPI-Interaction-ID", "it-006"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.message").value("segment must match ^[A-Z0-9_-]{2,30}$"));
+
+        org.mockito.Mockito.verifyNoInteractions(openProductsUseCase);
     }
 
     @Test
@@ -66,5 +98,31 @@ class OpenProductsControllerUnitTest {
         mockMvc.perform(get("/open-finance/v1/products"))
             .andExpect(status().isBadRequest())
             .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+    }
+
+    @Test
+    void publicCatalogueIgnoresAnUnverifiableBearerToken() throws Exception {
+        when(openProductsUseCase.listProducts(any())).thenReturn(new ProductListResult(List.of()));
+
+        mockMvc.perform(get("/open-finance/v1/products")
+                .header("X-FAPI-Interaction-ID", "it-002")
+                .header("Authorization", "Bearer not-a-jwt"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.Meta.TotalRecords").value(0));
+    }
+
+    @Test
+    void anyOtherPathIsRejected() throws Exception {
+        mockMvc.perform(get("/open-finance/v1/accounts").header("X-FAPI-Interaction-ID", "it-003"))
+            .andExpect(result -> org.assertj.core.api.Assertions
+                .assertThat(result.getResponse().getStatus()).isIn(401, 403));
+    }
+
+    @Test
+    void writesToTheCatalogueAreRejected() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/open-finance/v1/products").header("X-FAPI-Interaction-ID", "it-004"))
+            .andExpect(result -> org.assertj.core.api.Assertions
+                .assertThat(result.getResponse().getStatus()).isIn(401, 403));
     }
 }

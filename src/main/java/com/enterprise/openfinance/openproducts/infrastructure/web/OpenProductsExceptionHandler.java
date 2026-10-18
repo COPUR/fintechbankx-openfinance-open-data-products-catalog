@@ -1,5 +1,6 @@
 package com.enterprise.openfinance.openproducts.infrastructure.web;
 
+import com.enterprise.openfinance.openproducts.domain.exception.InvalidProductFilterException;
 import com.enterprise.openfinance.openproducts.infrastructure.web.dto.ErrorResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
@@ -20,6 +21,14 @@ public class OpenProductsExceptionHandler {
             interactionId(request),
             Instant.now()
         ));
+    }
+
+    @ExceptionHandler(InvalidProductFilterException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidFilter(InvalidProductFilterException ex, HttpServletRequest request) {
+        String interactionId = interactionId(request);
+        return ResponseEntity.badRequest()
+            .header("X-FAPI-Interaction-ID", interactionId)
+            .body(new ErrorResponse("INVALID_REQUEST", ex.getMessage(), interactionId, Instant.now()));
     }
 
     @ExceptionHandler(Exception.class)

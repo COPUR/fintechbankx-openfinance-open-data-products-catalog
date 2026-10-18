@@ -1,0 +1,9 @@
+apiVersion: v2
+name: open-products-catalog-service
+description: svc-of-open-products-catalog, the public Open Finance product catalogue of FinTechBankX.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+annotations:
+  fintechbankx.io/service-id: svc-of-open-products-catalog
+  fintechbankx.io/owning-squad: Open Data Squad

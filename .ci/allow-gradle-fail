@@ -1,3 +1,0 @@
-# Temporary compile/test debt bypass marker
-# Purpose: allow CI to enforce OpenAPI/FAPI/DPoP/security guardrails while legacy compile debt is remediated.
-# Remove this file once domain port and module compile debt is fixed.

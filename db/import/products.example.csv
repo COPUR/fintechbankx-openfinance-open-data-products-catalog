@@ -1,0 +1,6 @@
+product_id,product_type,segment,name,description,currency,monthly_fee_amount,annual_rate_percent,eligibility,status,effective_from,effective_to
+PCA-001,PCA,RETAIL,Everyday Current,Current account with no monthly fee,AED,0.00,0.00,UAE residents aged 18 or over,ACTIVE,2026-03-01T00:00:00Z,
+SAV-001,SAVINGS,RETAIL,Smart Saver,Savings account paying interest monthly,AED,0.00,1.25,Holders of an Everyday Current account,ACTIVE,2026-03-02T00:00:00Z,
+SME-LOAN-01,LOAN,SME,SME Growth Loan,Term loan for working capital,AED,0.00,6.75,Trade licence held for at least 2 years,ACTIVE,2026-03-03T00:00:00Z,
+SME-PCA-01,PCA,SME,SME Current,Business current account,AED,35.00,0.00,Companies with a valid UAE trade licence,ACTIVE,2026-03-04T00:00:00Z,
+CC-001,CREDIT_CARD,RETAIL,Retail Credit Card,Credit card launching next year,AED,0.00,18.99,Monthly income of at least 8000 AED,DRAFT,2027-01-01T00:00:00Z,
